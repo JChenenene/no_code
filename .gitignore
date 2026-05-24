@@ -4,6 +4,7 @@ worktrees/
 .agents/
 .codex-tmp/
 .npm-cache/
+lingchuang-ai-runtime/
 
 *.zip
 *.log

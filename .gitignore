@@ -5,6 +5,7 @@ worktrees/
 .codex-tmp/
 .npm-cache/
 lingchuang-ai-runtime/
+nginx-1.29.1/
 
 *.zip
 *.log
@@ -23,6 +24,3 @@ lingchuang-ai-runtime/
 **/.mvn/repository/
 **/.mvn/local-settings.xml
 **/.mvn/maven.config
-
-nginx-1.29.1/logs/
-nginx-1.29.1/nginx.exe

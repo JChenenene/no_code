@@ -1,0 +1,110 @@
+# 生产环境配置模板
+# 零创AI平台建议优先使用环境变量注入敏感信息
+# 以下默认值仅用于说明字段含义，请在部署前替换为真实配置
+spring:
+  application:
+    name: lingchuang-ai-backend
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${SPRING_DATASOURCE_URL:jdbc:mysql://<mysql-host>:3306/lingchuang_ai}
+    username: ${SPRING_DATASOURCE_USERNAME:<mysql-username>}
+    password: ${SPRING_DATASOURCE_PASSWORD:<mysql-password>}
+  data:
+    redis:
+      host: ${SPRING_DATA_REDIS_HOST:<redis-host>}
+      port: ${SPRING_DATA_REDIS_PORT:6379}
+      database: ${SPRING_DATA_REDIS_DATABASE:0}
+      password: ${SPRING_DATA_REDIS_PASSWORD:<redis-password>}
+      ttl: ${SPRING_DATA_REDIS_TTL:3600}
+langchain4j:
+  open-ai:
+    chat-model:
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY:<deepseek-api-key>}
+      model-name: deepseek-chat
+      max-tokens: 8192
+      log-requests: false
+      log-responses: false
+    streaming-chat-model:
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY:<deepseek-api-key>}
+      model-name: deepseek-chat
+      max-tokens: 8192
+      log-requests: false
+      log-responses: false
+    reasoning-streaming-chat-model:
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY:<deepseek-api-key>}
+      model-name: deepseek-reasoner
+      max-tokens: 32768
+      temperature: 0.1
+      log-requests: false
+      log-responses: false
+    routing-chat-model:
+      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      api-key: ${DASHSCOPE_API_KEY:<dashscope-api-key>}
+      model-name: qwen-turbo
+      max-tokens: 256
+      log-requests: false
+      log-responses: false
+cos:
+  client:
+    host: ${COS_HOST:https://<cos-domain>}
+    secretId: ${COS_SECRET_ID:<cos-secret-id>}
+    secretKey: ${COS_SECRET_KEY:<cos-secret-key>}
+    region: ${COS_REGION:<cos-region>}
+    bucket: ${COS_BUCKET:<cos-bucket>}
+dashscope:
+  api-key: ${DASHSCOPE_API_KEY:<dashscope-api-key>}
+  image-model: wan2.2-t2i-flash
+pexels:
+  api-key: ${PEXELS_API_KEY:<pexels-api-key>}
+mybatis-flex:
+  configuration:
+    log-impl: ''
+knife4j:
+  basic:
+    enable: true
+    username: ${KNIFE4J_BASIC_USERNAME:<doc-username>}
+    password: ${KNIFE4J_BASIC_PASSWORD:<doc-password>}
+code:
+  deploy-host: ${CODE_DEPLOY_HOST:http://<deploy-host>/dist}
+rag:
+  enabled: ${RAG_ENABLED:false}
+  bootstrap:
+    enabled: ${RAG_BOOTSTRAP_ENABLED:false}
+  knowledge:
+    base-path: ${RAG_KNOWLEDGE_BASE_PATH:classpath*:knowledge/**/*.md}
+  elasticsearch:
+    url: ${RAG_ELASTICSEARCH_URL:http://<es-host>:9200}
+    api-key: ${RAG_ELASTICSEARCH_API_KEY:}
+    username: ${RAG_ELASTICSEARCH_USERNAME:<es-username>}
+    password: ${RAG_ELASTICSEARCH_PASSWORD:<es-password>}
+    index-name: ${RAG_ELASTICSEARCH_INDEX_NAME:lc_knowledge_chunks}
+    dimension: ${RAG_ELASTICSEARCH_DIMENSION:1024}
+  embedding:
+    base-url: ${SILICONFLOW_BASE_URL:https://api.siliconflow.cn/v1}
+    api-key: ${SILICONFLOW_API_KEY:<siliconflow-api-key>}
+    model: ${SILICONFLOW_EMBEDDING_MODEL:BAAI/bge-large-zh-v1.5}
+  rerank:
+    base-url: ${SILICONFLOW_BASE_URL:https://api.siliconflow.cn/v1}
+    api-key: ${SILICONFLOW_API_KEY:<siliconflow-api-key>}
+    model: ${SILICONFLOW_RERANK_MODEL:BAAI/bge-reranker-v2-m3}
+  retrieve:
+    bm25-top-k: ${RAG_BM25_TOP_K:20}
+    dense-top-k: ${RAG_DENSE_TOP_K:20}
+    fused-top-k: ${RAG_FUSED_TOP_K:12}
+    final-top-k: ${RAG_FINAL_TOP_K:5}
+    dense-weight: ${RAG_DENSE_WEIGHT:0.55}
+    bm25-weight: ${RAG_BM25_WEIGHT:0.45}
+  query-expansion:
+    enabled: ${RAG_QUERY_EXPANSION_ENABLED:true}
+    timeout-ms: ${RAG_QUERY_EXPANSION_TIMEOUT_MS:3000}
+    short-query-chars: ${RAG_QUERY_EXPANSION_SHORT_QUERY_CHARS:80}
+    sparse-query-max-chars: ${RAG_QUERY_EXPANSION_SPARSE_QUERY_MAX_CHARS:180}
+    max-retrieval-query-chars: ${RAG_QUERY_EXPANSION_MAX_RETRIEVAL_QUERY_CHARS:240}
+    max-rewritten-prompt-chars: ${RAG_QUERY_EXPANSION_MAX_REWRITTEN_PROMPT_CHARS:600}
+    skip-code-like-input: ${RAG_QUERY_EXPANSION_SKIP_CODE_LIKE_INPUT:true}
+  timeout:
+    embedding-ms: ${RAG_EMBEDDING_TIMEOUT_MS:10000}
+    rerank-ms: ${RAG_RERANK_TIMEOUT_MS:10000}

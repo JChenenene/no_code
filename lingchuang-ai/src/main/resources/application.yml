@@ -1,0 +1,149 @@
+spring:
+  application:
+    name: lingchuang-ai-backend
+  # session 配置
+  session:
+    store-type: redis
+    # session 30 天过期
+    timeout: 2592000
+  # mysql
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/lingchuang_ai
+    username: ${SPRING_DATASOURCE_USERNAME:root}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+  # redis
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      database: 0
+      password:
+      ttl: 3600 # 缓存过期时间（秒）
+  profiles:
+    active: local
+server:
+  port: 8123
+  servlet:
+    context-path: /api
+    # cookie 30 天过期
+    session:
+      cookie:
+        max-age: 2592000
+# springdoc-openapi
+springdoc:
+  group-configs:
+    - group: 'default'
+      paths-to-match: '/**'
+      packages-to-scan: com.lingchuang.ai.controller
+# knife4j
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+# AI
+langchain4j:
+  open-ai:
+    chat-model:
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY:}
+      model-name: deepseek-chat
+
+      max-tokens: 8192
+      log-requests: true
+      log-responses: true
+      max-retries: 3
+
+    streaming-chat-model:
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY:}
+      model-name: deepseek-chat
+      max-tokens: 8192
+      log-requests: true
+      log-responses: true
+
+
+    # 推理 AI 模型配置（用于复杂的推理任务）
+    reasoning-streaming-chat-model:
+      base-url: https://api.deepseek.com
+      api-key: ${DEEPSEEK_API_KEY:}
+      model-name: deepseek-reasoner
+      max-tokens: 32768
+      temperature: 0.1
+      log-requests: true
+      log-responses: true
+#      thinking-mode: false          # ✅ 新增：关闭思考模式校验
+#      extra-body: '{"reasoning_content":"执行工具调用"}' # ✅ 新增：强制填充缺失字段，核心生效项
+    # 智能路由 AI 模型配置（用于简单的分类任务）
+    routing-chat-model:
+      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      api-key: ${DASHSCOPE_API_KEY:}
+      model-name: qwen-turbo
+      max-tokens: 256
+      log-requests: true
+      log-responses: true
+# 添加 COS 对象存储配置（需要从腾讯云获取）
+cos:
+  client:
+    host: https://0121389-1341213452.cos.ap-guangzhou.myqcloud.com
+    secretId: ${COS_SECRET_ID:}
+    secretKey: ${COS_SECRET_KEY:}
+    region: ap-guangzhou
+    bucket: 0121389-1341213452
+# Pexels 图片搜索配置
+pexels:
+  api-key: ${PEXELS_API_KEY:}
+# 阿里云 DashScope 配置
+dashscope:
+  api-key: ${DASHSCOPE_API_KEY:}
+  image-model: wan2.2-t2i-flash
+# 监控
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: always
+code:
+  deploy-host: http://localhost:8123/api/deploy
+rag:
+  enabled: ${RAG_ENABLED:true}
+  bootstrap:
+    enabled: ${RAG_BOOTSTRAP_ENABLED:true}
+  knowledge:
+    base-path: ${RAG_KNOWLEDGE_BASE_PATH:classpath*:knowledge/**/*.md}
+  elasticsearch:
+    url: ${RAG_ELASTICSEARCH_URL:http://127.0.0.1:9200}
+    api-key: ${RAG_ELASTICSEARCH_API_KEY:}
+    username: ${RAG_ELASTICSEARCH_USERNAME:}
+    password: ${RAG_ELASTICSEARCH_PASSWORD:}
+    index-name: ${RAG_ELASTICSEARCH_INDEX_NAME:lc_knowledge_chunks}
+    dimension: ${RAG_ELASTICSEARCH_DIMENSION:1024}
+  embedding:
+    base-url: ${SILICONFLOW_BASE_URL:https://api.siliconflow.cn/v1}
+    api-key: ${SILICONFLOW_API_KEY:}
+    model: ${SILICONFLOW_EMBEDDING_MODEL:BAAI/bge-large-zh-v1.5}
+  rerank:
+    base-url: ${SILICONFLOW_BASE_URL:https://api.siliconflow.cn/v1}
+    api-key: ${SILICONFLOW_API_KEY:}
+    model: ${SILICONFLOW_RERANK_MODEL:BAAI/bge-reranker-v2-m3}
+  retrieve:
+    bm25-top-k: ${RAG_BM25_TOP_K:20}
+    dense-top-k: ${RAG_DENSE_TOP_K:20}
+    fused-top-k: ${RAG_FUSED_TOP_K:12}
+    final-top-k: ${RAG_FINAL_TOP_K:5}
+    dense-weight: ${RAG_DENSE_WEIGHT:0.55}
+    bm25-weight: ${RAG_BM25_WEIGHT:0.45}
+  query-expansion:
+    enabled: ${RAG_QUERY_EXPANSION_ENABLED:true}
+    timeout-ms: ${RAG_QUERY_EXPANSION_TIMEOUT_MS:3000}
+    short-query-chars: ${RAG_QUERY_EXPANSION_SHORT_QUERY_CHARS:80}
+    sparse-query-max-chars: ${RAG_QUERY_EXPANSION_SPARSE_QUERY_MAX_CHARS:180}
+    max-retrieval-query-chars: ${RAG_QUERY_EXPANSION_MAX_RETRIEVAL_QUERY_CHARS:240}
+    max-rewritten-prompt-chars: ${RAG_QUERY_EXPANSION_MAX_REWRITTEN_PROMPT_CHARS:600}
+    skip-code-like-input: ${RAG_QUERY_EXPANSION_SKIP_CODE_LIKE_INPUT:true}
+  timeout:
+    embedding-ms: ${RAG_EMBEDDING_TIMEOUT_MS:10000}
+    rerank-ms: ${RAG_RERANK_TIMEOUT_MS:10000}

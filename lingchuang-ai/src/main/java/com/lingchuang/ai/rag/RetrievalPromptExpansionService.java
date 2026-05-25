@@ -44,10 +44,11 @@ public class RetrievalPromptExpansionService {
                                                                 CodeGenTypeEnum codeGenType) {
         String safeLatestUserMessage = StrUtil.trimToEmpty(latestUserMessage);
         List<ChatHistory> safeRecentHistories = recentHistories == null ? List.of() : List.copyOf(recentHistories);
-        String baseRetrievalQuery = StrUtil.trimToEmpty(
-                RagPromptSupport.buildRetrievalQuery(safeLatestUserMessage, safeRecentHistories)
-        );
         RagInvocationContext invocationContext = RagInvocationContext.getCurrent();
+        String memorySummary = invocationContext == null ? "" : StrUtil.trimToEmpty(invocationContext.getMemorySummary());
+        String baseRetrievalQuery = StrUtil.trimToEmpty(
+                RagPromptSupport.buildRetrievalQuery(safeLatestUserMessage, safeRecentHistories, memorySummary)
+        );
         if (invocationContext != null && StrUtil.isNotBlank(invocationContext.getExpandedRetrievalQuery())) {
             return RetrievalPromptExpansionOutcome.builder()
                     .retrievalQuery(invocationContext.getExpandedRetrievalQuery())
@@ -62,6 +63,7 @@ public class RetrievalPromptExpansionService {
                 safeRecentHistories,
                 codeGenType,
                 baseRetrievalQuery,
+                memorySummary,
                 false
         );
         cacheToInvocationContext(outcome);
@@ -70,13 +72,14 @@ public class RetrievalPromptExpansionService {
 
     public RetrievalPromptExpansionOutcome expandForDirectSearch(String rawQuery, CodeGenTypeEnum codeGenType) {
         String baseRetrievalQuery = StrUtil.trimToEmpty(rawQuery);
-        return expandInternal(baseRetrievalQuery, List.of(), codeGenType, baseRetrievalQuery, true);
+        return expandInternal(baseRetrievalQuery, List.of(), codeGenType, baseRetrievalQuery, "", true);
     }
 
     private RetrievalPromptExpansionOutcome expandInternal(String latestUserMessage,
                                                            List<ChatHistory> recentHistories,
                                                            CodeGenTypeEnum codeGenType,
                                                            String baseRetrievalQuery,
+                                                           String memorySummary,
                                                            boolean directSearchOnly) {
         if (!ragProperties.getQueryExpansion().isEnabled()) {
             return buildFallbackOutcome(latestUserMessage, codeGenType, baseRetrievalQuery, false, "disabled");
@@ -100,6 +103,7 @@ public class RetrievalPromptExpansionService {
                             recentHistories,
                             codeGenType,
                             baseRetrievalQuery,
+                            memorySummary,
                             directSearchOnly
                     )))
                     .orTimeout(ragProperties.getQueryExpansion().getTimeoutMs(), TimeUnit.MILLISECONDS)
@@ -204,6 +208,7 @@ public class RetrievalPromptExpansionService {
                                          List<ChatHistory> recentHistories,
                                          CodeGenTypeEnum codeGenType,
                                          String baseRetrievalQuery,
+                                         String memorySummary,
                                          boolean directSearchOnly) {
         String historySummary = RagPromptSupport.buildHistorySummary(recentHistories);
         return """
@@ -217,12 +222,16 @@ public class RetrievalPromptExpansionService {
 
                 recent_histories:
                 %s
+
+                persistent_memory_summary:
+                %s
                 """.formatted(
                 directSearchOnly ? "direct_search_only" : "user_request",
                 getCodeGenTypeValue(codeGenType),
                 baseRetrievalQuery,
                 StrUtil.blankToDefault(latestUserMessage, ""),
-                historySummary.isBlank() ? "无" : historySummary
+                historySummary.isBlank() ? "无" : historySummary,
+                StrUtil.blankToDefault(memorySummary, "无")
         ).trim();
     }
 

@@ -80,7 +80,56 @@
         <div v-if="workflowTimeline.length > 0" class="workflow-panel">
           <div class="workflow-panel-header">
             <span>V2 工作流</span>
-            <a-tag :color="workflowStatusColor">{{ workflowStatusText }}</a-tag>
+            <div class="workflow-panel-actions">
+              <a-button
+                  v-if="currentWorkflowRunId && canRetryWorkflow"
+                  type="link"
+                  size="small"
+                  :loading="retryingWorkflow"
+                  :disabled="isGenerating"
+                  @click="retryCurrentWorkflow"
+              >
+                重试
+              </a-button>
+              <a-button
+                  v-if="currentWorkflowRunId && workflowStatus === 'running'"
+                  type="link"
+                  danger
+                  size="small"
+                  :loading="cancellingWorkflow"
+                  @click="cancelCurrentWorkflow"
+              >
+                取消
+              </a-button>
+              <a-tag :color="workflowStatusColor">{{ workflowStatusText }}</a-tag>
+            </div>
+          </div>
+          <div v-if="browserVerificationArtifact" class="workflow-artifact">
+            <div class="workflow-artifact-title">
+              浏览器验证
+              <a-tag :color="browserVerificationResult?.passed ? 'success' : 'error'">
+                {{ browserVerificationResult?.passed ? '通过' : '未通过' }}
+              </a-tag>
+            </div>
+            <div class="workflow-artifact-desc">
+              {{ browserVerificationArtifact.summary || browserVerificationResult?.summary || '已生成浏览器验证报告' }}
+            </div>
+            <div class="workflow-artifact-meta">
+              <span v-if="browserVerificationResult?.firstScreenTextLength !== undefined">
+                首屏文本 {{ browserVerificationResult.firstScreenTextLength }}
+              </span>
+              <span v-if="browserVerificationResult?.consoleErrors?.length">
+                Console {{ browserVerificationResult.consoleErrors.length }}
+              </span>
+            </div>
+            <div class="workflow-artifact-actions">
+              <a-button v-if="browserVerificationUrl" type="link" size="small" @click="openBrowserVerificationUrl">
+                打开验证页面
+              </a-button>
+              <a-button v-if="verificationScreenshotUrl" type="link" size="small" @click="openVerificationScreenshot">
+                查看截图
+              </a-button>
+            </div>
           </div>
           <div class="workflow-timeline">
             <div
@@ -250,6 +299,8 @@ import {
   getAppVoById,
   deployApp as deployAppApi,
   deleteApp as deleteAppApi,
+  cancelWorkflowRun,
+  retryWorkflowRun,
   getLatestSucceededWorkflowRun,
   getLatestWorkflowRunDetail,
 } from '@/api/appController'
@@ -300,6 +351,7 @@ const generationModeOptions = [
 ]
 
 interface WorkflowTimelineItem {
+  runId?: number | string
   agentName?: string
   stage?: string
   status?: string
@@ -307,9 +359,59 @@ interface WorkflowTimelineItem {
   outputSummary?: string
 }
 
+interface BrowserVerificationResult {
+  enabled?: boolean
+  passed?: boolean
+  previewUrl?: string
+  screenshotPath?: string
+  screenshotUrl?: string
+  firstScreenTextLength?: number
+  consoleErrors?: string[]
+  issues?: string[]
+  summary?: string
+  errorMessage?: string
+  failureType?: string
+}
+
 const workflowTimeline = ref<WorkflowTimelineItem[]>([])
-const workflowStatus = ref<'idle' | 'running' | 'succeeded' | 'failed'>('idle')
+const workflowStatus = ref<'idle' | 'running' | 'succeeded' | 'failed' | 'cancelled'>('idle')
+const currentWorkflowRunId = ref<number | string | undefined>()
+const cancellingWorkflow = ref(false)
+const retryingWorkflow = ref(false)
 const latestWorkflowPreviewUrl = ref('')
+const workflowArtifacts = ref<API.WorkflowArtifact[]>([])
+
+const parseArtifactJson = <T,>(artifact?: API.WorkflowArtifact): T | undefined => {
+  if (!artifact?.jsonContent) return undefined
+  try {
+    return JSON.parse(artifact.jsonContent) as T
+  } catch (error) {
+    console.warn('解析 workflow artifact 失败:', error)
+    return undefined
+  }
+}
+
+const browserVerificationArtifact = computed(() =>
+    workflowArtifacts.value.find((artifact) => artifact.artifactType === 'browser_verification'),
+)
+
+const verificationScreenshotArtifact = computed(() =>
+    workflowArtifacts.value.find((artifact) => artifact.artifactType === 'verification_screenshot'),
+)
+
+const browserVerificationResult = computed(() =>
+    parseArtifactJson<BrowserVerificationResult>(browserVerificationArtifact.value),
+)
+
+const browserVerificationUrl = computed(() => {
+  const url = browserVerificationArtifact.value?.url || browserVerificationResult.value?.previewUrl
+  return url ? normalizePreviewUrl(url) : ''
+})
+
+const verificationScreenshotUrl = computed(() => {
+  const url = verificationScreenshotArtifact.value?.url || browserVerificationResult.value?.screenshotUrl
+  return url ? normalizePreviewUrl(url) : ''
+})
 
 const workflowStatusText = computed(() => {
   const statusTextMap = {
@@ -317,6 +419,7 @@ const workflowStatusText = computed(() => {
     running: '运行中',
     succeeded: '已完成',
     failed: '失败',
+    cancelled: '已取消',
   }
   return statusTextMap[workflowStatus.value]
 })
@@ -327,9 +430,12 @@ const workflowStatusColor = computed(() => {
     running: 'processing',
     succeeded: 'success',
     failed: 'error',
+    cancelled: 'default',
   }
   return colorMap[workflowStatus.value]
 })
+
+const canRetryWorkflow = computed(() => workflowStatus.value === 'failed' || workflowStatus.value === 'cancelled')
 
 // 对话历史相关
 const loadingHistory = ref(false)
@@ -481,6 +587,8 @@ const restoreLatestWorkflowRun = async () => {
     const detail = res.data.data
     const run = detail?.run
     if (!run?.status) return
+    currentWorkflowRunId.value = run.id
+    workflowArtifacts.value = detail?.artifacts || []
     if (run.status === 'succeeded' && run.previewUrl) {
       latestWorkflowPreviewUrl.value = normalizePreviewUrl(run.previewUrl)
       previewUrl.value = latestWorkflowPreviewUrl.value
@@ -490,7 +598,9 @@ const restoreLatestWorkflowRun = async () => {
         ? 'succeeded'
         : run.status === 'failed'
             ? 'failed'
-            : 'running'
+            : run.status === 'cancelled'
+                ? 'cancelled'
+                : 'running'
     const restoredSteps = (detail?.steps || []).map((step) => ({
       agentName: step.agentName || 'WorkflowV2',
       stage: step.stage,
@@ -512,6 +622,7 @@ const restoreLatestWorkflowRun = async () => {
     console.warn('恢复 V2 工作流记录失败:', error)
     workflowStatus.value = 'idle'
     workflowTimeline.value = []
+    workflowArtifacts.value = []
   }
 }
 
@@ -718,10 +829,10 @@ const generateCode = async (userMessage: string, aiMessageIndex: number) => {
 }
 
 const generateCodeWithWorkflowV2 = async (userMessage: string, aiMessageIndex: number) => {
-  let eventSource: EventSource | null = null
-  let streamCompleted = false
   workflowTimeline.value = []
   workflowStatus.value = 'running'
+  workflowArtifacts.value = []
+  currentWorkflowRunId.value = undefined
 
   try {
     const baseURL = request.defaults.baseURL || API_BASE_URL
@@ -730,99 +841,170 @@ const generateCodeWithWorkflowV2 = async (userMessage: string, aiMessageIndex: n
       message: userMessage,
     })
     const url = `${baseURL}/app/chat/gen/code/v2?${params}`
-    eventSource = new EventSource(url, { withCredentials: true })
-
-    const updateAiMessage = () => {
-      const latestStep = workflowTimeline.value[workflowTimeline.value.length - 1]
-      const lines = [
-        `V2 工作流${workflowStatusText.value}`,
-        latestStep?.agentName ? `当前 Agent: ${latestStep.agentName}` : '',
-        latestStep?.outputSummary || latestStep?.inputSummary || '',
-      ].filter(Boolean)
-      messages.value[aiMessageIndex].content = lines.join('\n\n')
-      messages.value[aiMessageIndex].loading = workflowStatus.value === 'running'
-      scrollToBottom()
-    }
-
-    eventSource.addEventListener('workflow_start', (event: MessageEvent) => {
-      const data = parseWorkflowEvent(event.data)
-      workflowTimeline.value.push({
-        agentName: 'Supervisor',
-        stage: 'INIT',
-        status: 'RUNNING',
-        outputSummary: data?.message || '开始执行 V2 多 Agent 工作流',
-      })
-      updateAiMessage()
-    })
-
-    eventSource.addEventListener('agent_completed', (event: MessageEvent) => {
-      const data = parseWorkflowEvent(event.data) as WorkflowTimelineItem | null
-      if (data?.agentName) {
-        workflowTimeline.value.push(data)
-      }
-      updateAiMessage()
-    })
-
-    eventSource.addEventListener('route_decision', (event: MessageEvent) => {
-      const data = parseWorkflowEvent(event.data)
-      if (data?.reason) {
-        workflowTimeline.value.push({
-          agentName: 'Supervisor',
-          stage: data.stage,
-          status: 'ROUTED',
-          outputSummary: data.reason,
-        })
-      }
-      updateAiMessage()
-    })
-
-    eventSource.addEventListener('workflow_completed', (event: MessageEvent) => {
-      if (streamCompleted) return
-      const data = parseWorkflowEvent(event.data)
-      workflowStatus.value = data?.finalStatus === 'SUCCESS' ? 'succeeded' : 'failed'
-      if (workflowStatus.value === 'succeeded' && data?.runId) {
-        const runPreviewUrl = buildWorkflowPreviewUrl(data.runId)
-        latestWorkflowPreviewUrl.value = runPreviewUrl
-        previewUrl.value = runPreviewUrl
-        previewReady.value = true
-      }
-      messages.value[aiMessageIndex].content = buildWorkflowCompletedMessage(data)
-      messages.value[aiMessageIndex].loading = false
-      streamCompleted = true
-      isGenerating.value = false
-      eventSource?.close()
-      setTimeout(async () => {
-        await fetchAppInfo()
-        updatePreview()
-      }, 1000)
-    })
-
-    eventSource.addEventListener('workflow_error', (event: MessageEvent) => {
-      const data = parseWorkflowEvent(event.data)
-      workflowStatus.value = 'failed'
-      messages.value[aiMessageIndex].content = `V2 工作流失败\n\n${data?.message || data?.error || '生成过程中出现错误'}`
-      messages.value[aiMessageIndex].loading = false
-      streamCompleted = true
-      isGenerating.value = false
-      eventSource?.close()
-    })
-
-    eventSource.addEventListener('done', () => {
-      if (streamCompleted) return
-      streamCompleted = true
-      isGenerating.value = false
-      eventSource?.close()
-    })
-
-    eventSource.onerror = function () {
-      if (streamCompleted || !isGenerating.value) return
-      workflowStatus.value = 'failed'
-      handleError(new Error('V2 工作流连接错误'), aiMessageIndex)
-      eventSource?.close()
-    }
+    attachWorkflowEventSource(new EventSource(url, { withCredentials: true }), aiMessageIndex)
   } catch (error) {
     workflowStatus.value = 'failed'
     handleError(error, aiMessageIndex)
+  }
+}
+
+const attachWorkflowEventSource = (eventSource: EventSource, aiMessageIndex: number) => {
+  let streamCompleted = false
+  const updateAiMessage = () => {
+    const latestStep = workflowTimeline.value[workflowTimeline.value.length - 1]
+    const lines = [
+      `V2 工作流${workflowStatusText.value}`,
+      latestStep?.agentName ? `当前 Agent: ${latestStep.agentName}` : '',
+      latestStep?.outputSummary || latestStep?.inputSummary || '',
+    ].filter(Boolean)
+    messages.value[aiMessageIndex].content = lines.join('\n\n')
+    messages.value[aiMessageIndex].loading = workflowStatus.value === 'running'
+    scrollToBottom()
+  }
+
+  eventSource.addEventListener('workflow_start', (event: MessageEvent) => {
+    const data = parseWorkflowEvent(event.data)
+    currentWorkflowRunId.value = data?.runId
+    workflowTimeline.value.push({
+      agentName: 'Supervisor',
+      stage: 'INIT',
+      status: 'RUNNING',
+      outputSummary: data?.message || '开始执行 V2 多 Agent 工作流',
+    })
+    updateAiMessage()
+  })
+
+  eventSource.addEventListener('agent_completed', (event: MessageEvent) => {
+    const data = parseWorkflowEvent(event.data) as WorkflowTimelineItem | null
+    if (data?.runId) {
+      currentWorkflowRunId.value = data.runId
+    }
+    if (data?.agentName) {
+      workflowTimeline.value.push(data)
+    }
+    updateAiMessage()
+  })
+
+  eventSource.addEventListener('route_decision', (event: MessageEvent) => {
+    const data = parseWorkflowEvent(event.data)
+    if (data?.reason) {
+      workflowTimeline.value.push({
+        agentName: 'Supervisor',
+        stage: data.stage,
+        status: 'ROUTED',
+        outputSummary: data.reason,
+      })
+    }
+    updateAiMessage()
+  })
+
+  eventSource.addEventListener('workflow_completed', (event: MessageEvent) => {
+    if (streamCompleted) return
+    const data = parseWorkflowEvent(event.data)
+    if (data?.runId) {
+      currentWorkflowRunId.value = data.runId
+    }
+    workflowStatus.value = data?.finalStatus === 'SUCCESS' ? 'succeeded' : 'failed'
+    if (workflowStatus.value === 'succeeded' && data?.runId) {
+      const runPreviewUrl = buildWorkflowPreviewUrl(data.runId)
+      latestWorkflowPreviewUrl.value = runPreviewUrl
+      previewUrl.value = runPreviewUrl
+      previewReady.value = true
+    }
+    messages.value[aiMessageIndex].content = buildWorkflowCompletedMessage(data)
+    messages.value[aiMessageIndex].loading = false
+    streamCompleted = true
+    isGenerating.value = false
+    eventSource.close()
+    setTimeout(async () => {
+      await restoreLatestWorkflowRun()
+      updatePreview()
+    }, 1000)
+  })
+
+  eventSource.addEventListener('workflow_cancelled', (event: MessageEvent) => {
+    if (streamCompleted) return
+    const data = parseWorkflowEvent(event.data)
+    workflowStatus.value = 'cancelled'
+    messages.value[aiMessageIndex].content = `V2 工作流已取消\n\n${data?.error || data?.message || '用户取消 V2 工作流'}`
+    messages.value[aiMessageIndex].loading = false
+    streamCompleted = true
+    isGenerating.value = false
+    eventSource.close()
+    setTimeout(async () => {
+      await restoreLatestWorkflowRun()
+    }, 500)
+  })
+
+  eventSource.addEventListener('workflow_error', (event: MessageEvent) => {
+    const data = parseWorkflowEvent(event.data)
+    workflowStatus.value = 'failed'
+    messages.value[aiMessageIndex].content = `V2 工作流失败\n\n${data?.message || data?.error || '生成过程中出现错误'}`
+    messages.value[aiMessageIndex].loading = false
+    streamCompleted = true
+    isGenerating.value = false
+    eventSource.close()
+  })
+
+  eventSource.addEventListener('done', () => {
+    if (streamCompleted) return
+    streamCompleted = true
+    isGenerating.value = false
+    eventSource.close()
+  })
+
+  eventSource.onerror = function () {
+    if (streamCompleted || !isGenerating.value) return
+    workflowStatus.value = 'failed'
+    handleError(new Error('V2 工作流连接错误'), aiMessageIndex)
+    eventSource.close()
+  }
+}
+
+const cancelCurrentWorkflow = async () => {
+  if (!currentWorkflowRunId.value || cancellingWorkflow.value) return
+  cancellingWorkflow.value = true
+  try {
+    const res = await cancelWorkflowRun({ runId: currentWorkflowRunId.value as unknown as number })
+    if (res.data.code === 0 && res.data.data) {
+      workflowStatus.value = 'cancelled'
+      message.success('已请求取消 V2 工作流')
+      await restoreLatestWorkflowRun()
+    } else {
+      message.warning(res.data.message || '当前工作流无法取消')
+    }
+  } catch (error) {
+    console.error('取消 V2 工作流失败:', error)
+    message.error('取消失败，请重试')
+  } finally {
+    cancellingWorkflow.value = false
+  }
+}
+
+const retryCurrentWorkflow = async () => {
+  if (!currentWorkflowRunId.value || !canRetryWorkflow.value || isGenerating.value || retryingWorkflow.value) return
+  retryingWorkflow.value = true
+  workflowTimeline.value = []
+  workflowArtifacts.value = []
+  workflowStatus.value = 'running'
+  isGenerating.value = true
+  const aiMessageIndex = messages.value.length
+  messages.value.push({
+    type: 'ai',
+    content: 'V2 工作流运行中',
+    loading: true,
+  })
+  await nextTick()
+  scrollToBottom()
+  try {
+    const baseURL = request.defaults.baseURL || API_BASE_URL
+    const url = `${baseURL}/app/workflow/${currentWorkflowRunId.value}/retry`
+    attachWorkflowEventSource(new EventSource(url, { withCredentials: true }), aiMessageIndex)
+  } catch (error) {
+    workflowStatus.value = 'failed'
+    handleError(error, aiMessageIndex)
+  } finally {
+    retryingWorkflow.value = false
   }
 }
 
@@ -844,6 +1026,18 @@ const buildWorkflowCompletedMessage = (data: any) => {
       ? `\n\n问题:\n${data.verificationIssues.map((issue: string) => `- ${issue}`).join('\n')}`
       : ''
   return `V2 工作流执行${finalStatus}${verificationSummary}${fixSummary}${issues}`
+}
+
+const openBrowserVerificationUrl = () => {
+  if (browserVerificationUrl.value) {
+    window.open(browserVerificationUrl.value, '_blank')
+  }
+}
+
+const openVerificationScreenshot = () => {
+  if (verificationScreenshotUrl.value) {
+    window.open(verificationScreenshotUrl.value, '_blank')
+  }
 }
 
 // 错误处理函数
@@ -1217,6 +1411,53 @@ onUnmounted(() => {
 .workflow-timeline {
   max-height: 132px;
   overflow-y: auto;
+}
+
+.workflow-artifact {
+  margin-bottom: 10px;
+  padding: 8px;
+  border: 1px solid #edf0f2;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.workflow-artifact-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1f1f1f;
+}
+
+.workflow-artifact-desc {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-artifact-meta {
+  display: flex;
+  gap: 12px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #8c8c8c;
+}
+
+.workflow-artifact-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.workflow-artifact-actions :deep(.ant-btn-link) {
+  height: auto;
+  padding: 0;
+  font-size: 12px;
 }
 
 .workflow-step {

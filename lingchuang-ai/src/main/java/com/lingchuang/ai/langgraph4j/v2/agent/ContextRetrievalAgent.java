@@ -6,6 +6,8 @@ import com.lingchuang.ai.langgraph4j.v2.model.AgentExecutionRecord;
 import com.lingchuang.ai.langgraph4j.v2.model.RetrievalBundle;
 import com.lingchuang.ai.langgraph4j.v2.model.TaskSpec;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowStage;
+import com.lingchuang.ai.langgraph4j.v2.skill.SkillLoadResult;
+import com.lingchuang.ai.langgraph4j.v2.skill.SkillRegistryService;
 import com.lingchuang.ai.langgraph4j.v2.state.AgentSessionState;
 import com.lingchuang.ai.model.enums.CodeGenTypeEnum;
 import com.lingchuang.ai.rag.KnowledgeSearchService;
@@ -13,6 +15,7 @@ import com.lingchuang.ai.rag.RetrievalPromptExpansionOutcome;
 import com.lingchuang.ai.rag.RetrievalPromptExpansionService;
 import com.lingchuang.ai.rag.model.HybridRetrievalResult;
 import com.lingchuang.ai.rag.model.RetrievedChunk;
+import com.lingchuang.ai.service.AppChatSummaryService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.prebuilt.MessagesState;
@@ -33,6 +36,8 @@ public class ContextRetrievalAgent {
 
     private final KnowledgeSearchService knowledgeSearchService;
     private final RetrievalPromptExpansionService retrievalPromptExpansionService;
+    private final SkillRegistryService skillRegistryService;
+    private final AppChatSummaryService appChatSummaryService;
 
     public Map<String, Object> execute(MessagesState<String> state) {
         AgentSessionState sessionState = AgentSessionState.getState(state);
@@ -43,18 +48,24 @@ public class ContextRetrievalAgent {
                 "RetrievalPromptExpansionService+KnowledgeSearchService"
         );
         TaskSpec taskSpec = sessionState.getTaskSpec();
+        SkillLoadResult skillLoadResult = loadRequiredSkills(taskSpec);
+        String memorySummary = loadMemorySummary(sessionState);
         if (taskSpec != null && !taskSpec.isNeedsRetrieval()) {
             RetrievalBundle retrievalBundle = RetrievalBundle.builder()
                     .enabled(false)
-                    .degraded(false)
-                    .summary("规划阶段判定无需检索增强")
+                    .degraded(CollUtil.isNotEmpty(skillLoadResult.getMissingSkillIds()))
+                    .summary(buildSkippedSummary(skillLoadResult, memorySummary))
+                    .memorySummary(memorySummary)
+                    .loadedSkills(skillLoadResult.getLoadedSkillIds())
+                    .missingSkills(skillLoadResult.getMissingSkillIds())
+                    .skillContents(skillLoadResult.getSkillContents())
                     .build();
             sessionState.setRetrievalBundle(retrievalBundle);
             sessionState.finishAgentExecution(executionRecord, "SKIPPED", retrievalBundle.getSummary(), "unavailable");
             return AgentSessionState.saveState(sessionState);
         }
         CodeGenTypeEnum codeGenTypeEnum = resolveCodeGenType(taskSpec);
-        String baseQuery = buildRetrievalInput(taskSpec);
+        String baseQuery = buildRetrievalInput(taskSpec, memorySummary);
         RetrievalBundle retrievalBundle;
         String status = "SUCCESS";
         try {
@@ -67,7 +78,8 @@ public class ContextRetrievalAgent {
                     .enabled(true)
                     .degraded(false)
                     .retrievalQuery(retrievalQuery)
-                    .summary(buildSummary(selectedChunks))
+                    .summary(buildSummary(selectedChunks, skillLoadResult, memorySummary))
+                    .memorySummary(memorySummary)
                     .sources(selectedChunks.stream()
                             .map(chunk -> "%s | %s".formatted(
                                     StrUtil.blankToDefault(chunk.getTitle(), "未命名文档"),
@@ -76,6 +88,9 @@ public class ContextRetrievalAgent {
                     .snippets(selectedChunks.stream()
                             .map(chunk -> truncate(StrUtil.blankToDefault(chunk.getContent(), ""), 220))
                             .toList())
+                    .loadedSkills(skillLoadResult.getLoadedSkillIds())
+                    .missingSkills(skillLoadResult.getMissingSkillIds())
+                    .skillContents(skillLoadResult.getSkillContents())
                     .build();
         } catch (Exception e) {
             log.warn("requestId={}, agent={}, 检索执行失败，降级继续: {}",
@@ -85,8 +100,12 @@ public class ContextRetrievalAgent {
                     .enabled(true)
                     .degraded(true)
                     .retrievalQuery(baseQuery)
-                    .summary("检索降级，继续执行主流程")
+                    .summary(buildDegradedSummary(memorySummary))
+                    .memorySummary(memorySummary)
                     .errorMessage(e.getMessage())
+                    .loadedSkills(skillLoadResult.getLoadedSkillIds())
+                    .missingSkills(skillLoadResult.getMissingSkillIds())
+                    .skillContents(skillLoadResult.getSkillContents())
                     .build();
         }
         sessionState.setRetrievalBundle(retrievalBundle);
@@ -114,11 +133,14 @@ public class ContextRetrievalAgent {
         return codeGenTypeEnum == null ? CodeGenTypeEnum.HTML : codeGenTypeEnum;
     }
 
-    private String buildRetrievalInput(TaskSpec taskSpec) {
+    private String buildRetrievalInput(TaskSpec taskSpec, String memorySummary) {
         if (taskSpec == null) {
             return "";
         }
         StringBuilder builder = new StringBuilder();
+        if (StrUtil.isNotBlank(memorySummary)) {
+            builder.append("长期对话摘要: ").append(memorySummary).append("\n");
+        }
         builder.append(StrUtil.blankToDefault(taskSpec.getGoal(), taskSpec.getOriginalPrompt()));
         if (StrUtil.isNotBlank(taskSpec.getPageScope()) && !"未明确".equals(taskSpec.getPageScope())) {
             builder.append("\n页面范围: ").append(taskSpec.getPageScope());
@@ -130,6 +152,33 @@ public class ContextRetrievalAgent {
             builder.append("\n验收标准: ").append(String.join("；", taskSpec.getAcceptanceCriteria()));
         }
         return builder.toString().trim();
+    }
+
+    private SkillLoadResult loadRequiredSkills(TaskSpec taskSpec) {
+        if (taskSpec == null || CollUtil.isEmpty(taskSpec.getRequiredSkills())) {
+            return SkillLoadResult.builder().build();
+        }
+        try {
+            return skillRegistryService.loadSkills(taskSpec.getRequiredSkills());
+        } catch (Exception e) {
+            log.warn("加载 Skill 失败，requiredSkills={}, error={}", taskSpec.getRequiredSkills(), e.getMessage());
+            return SkillLoadResult.builder()
+                    .missingSkillIds(taskSpec.getRequiredSkills())
+                    .build();
+        }
+    }
+
+    private String loadMemorySummary(AgentSessionState sessionState) {
+        if (sessionState == null || sessionState.getAppId() == null) {
+            return "";
+        }
+        try {
+            return StrUtil.trimToEmpty(appChatSummaryService.getLatestSummaryText(sessionState.getAppId(), null));
+        } catch (Exception e) {
+            log.warn("requestId={}, agent={}, 加载摘要记忆失败，降级继续: {}",
+                    sessionState.getRequestId(), AGENT_NAME, e.getMessage());
+            return "";
+        }
     }
 
     private List<RetrievedChunk> selectChunks(HybridRetrievalResult retrievalResult) {
@@ -148,11 +197,55 @@ public class ContextRetrievalAgent {
         return CollUtil.emptyIfNull(retrievalResult.getBm25Results());
     }
 
-    private String buildSummary(List<RetrievedChunk> chunks) {
+    private String buildSummary(List<RetrievedChunk> chunks, SkillLoadResult skillLoadResult, String memorySummary) {
+        String skillSummary = buildSkillSummary(skillLoadResult);
+        String memoryText = StrUtil.isBlank(memorySummary) ? "" : "已加载长期摘要记忆";
         if (CollUtil.isEmpty(chunks)) {
-            return "未检索到额外上下文";
+            return joinSummary("未检索到额外上下文", skillSummary, memoryText);
         }
-        return "检索命中 %d 个上下文片段，可用于补充规范与模板约束".formatted(chunks.size());
+        String retrievalSummary = "检索命中 %d 个上下文片段，可用于补充规范与模板约束".formatted(chunks.size());
+        return joinSummary(retrievalSummary, skillSummary, memoryText);
+    }
+
+    private String buildSkippedSummary(SkillLoadResult skillLoadResult, String memorySummary) {
+        String skillSummary = buildSkillSummary(skillLoadResult);
+        String memoryText = StrUtil.isBlank(memorySummary) ? "" : "已加载长期摘要记忆";
+        return joinSummary("规划阶段判定无需 RAG 检索增强", skillSummary, memoryText);
+    }
+
+    private String buildDegradedSummary(String memorySummary) {
+        if (StrUtil.isBlank(memorySummary)) {
+            return "检索降级，继续执行主流程";
+        }
+        return "检索降级，已加载长期摘要记忆，继续执行主流程";
+    }
+
+    private String joinSummary(String primary, String... extras) {
+        StringBuilder builder = new StringBuilder(primary);
+        for (String extra : extras) {
+            if (StrUtil.isBlank(extra)) {
+                continue;
+            }
+            builder.append("；").append(extra);
+        }
+        return builder.toString();
+    }
+
+    private String buildSkillSummary(SkillLoadResult skillLoadResult) {
+        if (skillLoadResult == null) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder();
+        if (CollUtil.isNotEmpty(skillLoadResult.getLoadedSkillIds())) {
+            builder.append("已加载 Skill: ").append(String.join("，", skillLoadResult.getLoadedSkillIds()));
+        }
+        if (CollUtil.isNotEmpty(skillLoadResult.getMissingSkillIds())) {
+            if (!builder.isEmpty()) {
+                builder.append("；");
+            }
+            builder.append("缺失 Skill: ").append(String.join("，", skillLoadResult.getMissingSkillIds()));
+        }
+        return builder.toString();
     }
 
     private String truncate(String text, int maxLength) {

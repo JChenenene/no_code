@@ -15,19 +15,41 @@ import java.util.stream.Collectors;
  */
 public final class RagPromptSupport {
 
+    private static final int RECENT_RAW_HISTORY_COUNT = 4;
+    private static final int HISTORY_ITEM_MAX_CHARS = 320;
+
     private RagPromptSupport() {
     }
 
     public static String buildRetrievalQuery(String latestUserMessage, List<ChatHistory> recentHistories) {
+        return buildRetrievalQuery(latestUserMessage, recentHistories, "");
+    }
+
+    public static String buildRetrievalQuery(String latestUserMessage,
+                                             List<ChatHistory> recentHistories,
+                                             String memorySummary) {
         String historySummary = buildHistorySummary(recentHistories);
-        if (historySummary.isBlank()) {
-            return StrUtil.blankToDefault(latestUserMessage, "");
+        StringBuilder builder = new StringBuilder();
+        if (StrUtil.isNotBlank(memorySummary)) {
+            builder.append("[长期摘要记忆]\n").append(memorySummary).append("\n");
         }
-        return historySummary + "\n" + StrUtil.blankToDefault(latestUserMessage, "");
+        if (StrUtil.isNotBlank(historySummary)) {
+            builder.append(historySummary).append("\n");
+        }
+        builder.append(StrUtil.blankToDefault(latestUserMessage, ""));
+        return builder.toString().trim();
     }
 
     public static String buildAugmentedPrompt(String effectiveUserPrompt,
                                               List<ChatHistory> recentHistories,
+                                              CodeGenTypeEnum codeGenType,
+                                              List<RetrievedChunk> chunks) {
+        return buildAugmentedPrompt(effectiveUserPrompt, recentHistories, "", codeGenType, chunks);
+    }
+
+    public static String buildAugmentedPrompt(String effectiveUserPrompt,
+                                              List<ChatHistory> recentHistories,
+                                              String memorySummary,
                                               CodeGenTypeEnum codeGenType,
                                               List<RetrievedChunk> chunks) {
         String resolvedUserPrompt = StrUtil.blankToDefault(effectiveUserPrompt, "");
@@ -45,6 +67,9 @@ public final class RagPromptSupport {
                 近期对话上下文：
                 %s
 
+                长期摘要记忆：
+                %s
+
                 检索到的相关规范/模板/示例：
                 %s
 
@@ -56,6 +81,7 @@ public final class RagPromptSupport {
                 """.formatted(
                 resolvedUserPrompt,
                 historySummary.isBlank() ? "无" : historySummary,
+                StrUtil.blankToDefault(memorySummary, "无"),
                 formatRetrievedChunks(chunks),
                 codeGenType == null ? "unknown" : codeGenType.getValue()
         ).trim();
@@ -65,12 +91,30 @@ public final class RagPromptSupport {
         if (CollUtil.isEmpty(recentHistories)) {
             return "";
         }
-        return recentHistories.stream()
+        int compactBoundary = Math.max(0, recentHistories.size() - RECENT_RAW_HISTORY_COUNT);
+        String recentRawHistory = recentHistories.stream()
+                .skip(compactBoundary)
                 .map(history -> {
                     String role = ChatHistoryMessageTypeEnum.AI.getValue().equals(history.getMessageType()) ? "AI" : "USER";
-                    return role + ": " + StrUtil.blankToDefault(history.getMessage(), "");
+                    return role + ": " + truncate(StrUtil.blankToDefault(history.getMessage(), ""), HISTORY_ITEM_MAX_CHARS);
                 })
                 .collect(Collectors.joining("\n"));
+        if (compactBoundary == 0) {
+            return recentRawHistory;
+        }
+        long compactedTurns = Math.max(1, compactBoundary / 2);
+        String compactedSummary = recentHistories.stream()
+                .limit(compactBoundary)
+                .map(history -> {
+                    String role = ChatHistoryMessageTypeEnum.AI.getValue().equals(history.getMessageType()) ? "AI" : "USER";
+                    return role + ": " + truncate(StrUtil.blankToDefault(history.getMessage(), ""), 80);
+                })
+                .collect(Collectors.joining("；"));
+        return """
+                [历史摘要] 已压缩 %d 轮较早对话：%s
+                [最近原文]
+                %s
+                """.formatted(compactedTurns, compactedSummary, recentRawHistory).trim();
     }
 
     public static String formatRetrievedChunks(List<RetrievedChunk> chunks) {
@@ -87,5 +131,12 @@ public final class RagPromptSupport {
                         chunk.getContent()
                 ).trim())
                 .collect(Collectors.joining("\n"));
+    }
+
+    private static String truncate(String text, int maxLength) {
+        if (StrUtil.isBlank(text) || text.length() <= maxLength) {
+            return StrUtil.blankToDefault(text, "");
+        }
+        return text.substring(0, maxLength) + "...（已压缩）";
     }
 }

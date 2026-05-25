@@ -17,12 +17,15 @@ import com.lingchuang.ai.langgraph4j.v2.state.AgentSessionState;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.prebuilt.MessagesState;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -40,6 +43,30 @@ public class AssetPlanningAgent {
     private final UndrawIllustrationTool undrawIllustrationTool;
     private final MermaidDiagramTool mermaidDiagramTool;
     private final LogoGeneratorTool logoGeneratorTool;
+
+    @Value("${pexels.api-key:}")
+    private String pexelsApiKey;
+
+    @Value("${dashscope.api-key:}")
+    private String dashScopeApiKey;
+
+    @Value("${cos.client.host:}")
+    private String cosHost;
+
+    @Value("${cos.client.secretId:}")
+    private String cosSecretId;
+
+    @Value("${cos.client.secretKey:}")
+    private String cosSecretKey;
+
+    @Value("${cos.client.region:}")
+    private String cosRegion;
+
+    @Value("${cos.client.bucket:}")
+    private String cosBucket;
+
+    @Value("${workflow.asset.mermaid-cli-command:}")
+    private String mermaidCliCommand;
 
     public Map<String, Object> execute(MessagesState<String> state) {
         AgentSessionState sessionState = AgentSessionState.getState(state);
@@ -70,6 +97,24 @@ public class AssetPlanningAgent {
                         .summary("未规划额外素材需求")
                         .build();
             } else {
+                List<String> missingDependencies = findMissingDependencies(imageCollectionPlan);
+                if (CollUtil.isNotEmpty(missingDependencies)) {
+                    assetPlan = AssetPlan.builder()
+                            .degraded(true)
+                            .imageCollectionPlan(imageCollectionPlan)
+                            .assets(List.of())
+                            .summary("素材依赖缺失，已跳过素材收集并降级继续")
+                            .errorMessage("缺少素材收集依赖: " + String.join("；", missingDependencies))
+                            .build();
+                    sessionState.setAssetPlan(assetPlan);
+                    sessionState.finishAgentExecution(
+                            executionRecord,
+                            "DEGRADED",
+                            "degraded=true, assets=0",
+                            "unavailable"
+                    );
+                    return AgentSessionState.saveState(sessionState);
+                }
                 assetPlan = collectAssets(imageCollectionPlan, sessionState.getRequestId());
             }
         } catch (Exception e) {
@@ -99,6 +144,59 @@ public class AssetPlanningAgent {
                 assetPlan.getAssets() == null ? 0 : assetPlan.getAssets().size(),
                 executionRecord.getDurationMs());
         return AgentSessionState.saveState(sessionState);
+    }
+
+    private List<String> findMissingDependencies(ImageCollectionPlan imageCollectionPlan) {
+        List<String> missingDependencies = new ArrayList<>();
+        if (CollUtil.isNotEmpty(imageCollectionPlan.getContentImageTasks())
+                && StrUtil.isBlank(pexelsApiKey)) {
+            missingDependencies.add("Pexels API Key");
+        }
+        if (CollUtil.isNotEmpty(imageCollectionPlan.getLogoTasks())
+                && StrUtil.isBlank(dashScopeApiKey)) {
+            missingDependencies.add("DashScope API Key");
+        }
+        if (CollUtil.isNotEmpty(imageCollectionPlan.getDiagramTasks())) {
+            if (!isCommandAvailable(resolveMermaidCommand())) {
+                missingDependencies.add("Mermaid CLI");
+            }
+            if (!isCosConfigured()) {
+                missingDependencies.add("COS 配置");
+            }
+        }
+        return missingDependencies;
+    }
+
+    private String resolveMermaidCommand() {
+        if (StrUtil.isNotBlank(mermaidCliCommand)) {
+            return mermaidCliCommand;
+        }
+        String osName = System.getProperty("os.name", "").toLowerCase();
+        return osName.contains("win") ? "mmdc.cmd" : "mmdc";
+    }
+
+    private boolean isCommandAvailable(String command) {
+        String probeCommand = System.getProperty("os.name", "").toLowerCase().contains("win") ? "where" : "which";
+        ProcessBuilder processBuilder = new ProcessBuilder(probeCommand, command);
+        processBuilder.redirectErrorStream(true);
+        try {
+            Process process = processBuilder.start();
+            boolean finished = process.waitFor(2, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                return false;
+            }
+            return process.exitValue() == 0;
+        } catch (IOException e) {
+            return false;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    private boolean isCosConfigured() {
+        return StrUtil.isAllNotBlank(cosHost, cosSecretId, cosSecretKey, cosRegion, cosBucket);
     }
 
     private AssetPlan collectAssets(ImageCollectionPlan imageCollectionPlan, String requestId) {

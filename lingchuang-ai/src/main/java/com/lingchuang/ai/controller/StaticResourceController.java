@@ -58,6 +58,9 @@ public class StaticResourceController {
         try {
             // 获取资源路径
             String resourcePath = (String) request.getAttribute(HandlerMapping.PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE);
+            if (resourcePath == null || !resourcePath.startsWith(requestPathPrefix)) {
+                return ResponseEntity.notFound().build();
+            }
             resourcePath = resourcePath.substring(requestPathPrefix.length());
             // 如果是目录访问（不带斜杠），重定向到带斜杠的URL
             if (resourcePath.isEmpty()) {
@@ -66,15 +69,18 @@ public class StaticResourceController {
                 return new ResponseEntity<>(headers, HttpStatus.MOVED_PERMANENTLY);
             }
             // 默认返回 index.html
-            if (resourcePath.equals("/")) {
-                resourcePath = "/index.html";
-            }
             // 构建文件路径
             Path rootPath = Path.of(rootDir).toAbsolutePath().normalize();
             Path resourceRootPath = rootPath.resolve(resourceKey).normalize();
             Path targetPath = resourceRootPath.resolve(resourcePath.substring(1)).normalize();
             if (!targetPath.startsWith(resourceRootPath)) {
                 return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+            }
+            if (targetPath.toFile().isDirectory()) {
+                targetPath = targetPath.resolve("index.html").normalize();
+                if (!targetPath.startsWith(resourceRootPath)) {
+                    return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+                }
             }
             File file = targetPath.toFile();
             // 检查文件是否存在

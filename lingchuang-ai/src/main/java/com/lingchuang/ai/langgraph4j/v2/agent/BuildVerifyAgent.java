@@ -5,9 +5,12 @@ import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.StrUtil;
 import com.lingchuang.ai.core.builder.VueProjectBuilder;
 import com.lingchuang.ai.langgraph4j.v2.model.AgentExecutionRecord;
+import com.lingchuang.ai.langgraph4j.v2.model.BrowserVerificationRequest;
+import com.lingchuang.ai.langgraph4j.v2.model.BrowserVerificationResult;
 import com.lingchuang.ai.langgraph4j.v2.model.TaskSpec;
 import com.lingchuang.ai.langgraph4j.v2.model.VerificationArtifact;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowStage;
+import com.lingchuang.ai.langgraph4j.v2.service.BrowserVerificationService;
 import com.lingchuang.ai.langgraph4j.v2.service.GeneratedArtifactSupport;
 import com.lingchuang.ai.langgraph4j.v2.state.AgentSessionState;
 import com.lingchuang.ai.model.enums.CodeGenTypeEnum;
@@ -18,12 +21,14 @@ import org.springframework.stereotype.Component;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -39,11 +44,14 @@ import java.util.regex.Pattern;
 public class BuildVerifyAgent {
 
     private static final String AGENT_NAME = "BuildVerifyAgent";
+    private static final long MAX_ARTIFACT_BYTES = 2L * 1024L * 1024L;
     private static final Pattern STATIC_REF_PATTERN = Pattern.compile("(?:src|href)\\s*=\\s*[\"']([^\"'#?]+(?:\\?[^\"']*)?(?:#[^\"']*)?)[\"']",
             Pattern.CASE_INSENSITIVE);
+    private static final Pattern URI_SCHEME_PATTERN = Pattern.compile("^[a-zA-Z][a-zA-Z0-9+.-]*:");
 
     private final VueProjectBuilder vueProjectBuilder;
     private final GeneratedArtifactSupport generatedArtifactSupport;
+    private final BrowserVerificationService browserVerificationService;
 
     public Map<String, Object> execute(MessagesState<String> state) {
         AgentSessionState sessionState = AgentSessionState.getState(state);
@@ -54,6 +62,7 @@ public class BuildVerifyAgent {
                 "local-verifier"
         );
         VerificationArtifact verificationArtifact = verify(sessionState);
+        verificationArtifact = verifyWithBrowserIfPossible(sessionState, verificationArtifact);
         sessionState.setVerificationArtifact(verificationArtifact);
         sessionState.finishAgentExecution(
                 executionRecord,
@@ -84,20 +93,114 @@ public class BuildVerifyAgent {
                     .failureType("missing_artifact")
                     .build();
         }
+        long artifactSizeBytes = calculateDirectorySize(generatedCodeDir);
+        if (artifactSizeBytes > MAX_ARTIFACT_BYTES) {
+            return VerificationArtifact.builder()
+                    .buildRequired(codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT)
+                    .passed(false)
+                    .buildResultDir(generatedCodeDir)
+                    .details(List.of(formatArtifactSizeDetail(artifactSizeBytes)))
+                    .issues(List.of("产物目录过大: %s，超过限制 %s".formatted(
+                            formatBytes(artifactSizeBytes),
+                            formatBytes(MAX_ARTIFACT_BYTES))))
+                    .summary("产物大小验证失败")
+                    .errorMessage("产物目录过大")
+                    .canFix(true)
+                    .failureType("artifact_size")
+                    .build();
+        }
         return switch (codeGenTypeEnum) {
             case HTML, MULTI_FILE -> verifyStaticProject(generatedCodeDir, codeGenTypeEnum);
             case VUE_PROJECT -> verifyVueProject(generatedCodeDir);
         };
     }
 
+    private VerificationArtifact verifyWithBrowserIfPossible(AgentSessionState sessionState,
+                                                             VerificationArtifact localVerification) {
+        if (localVerification == null || !localVerification.isPassed()) {
+            return localVerification;
+        }
+        if (sessionState == null
+                || sessionState.getAppId() == null
+                || sessionState.getWorkflowRunId() == null
+                || browserVerificationService == null) {
+            return localVerification;
+        }
+        CodeGenTypeEnum codeGenTypeEnum = resolveCodeGenType(sessionState.getTaskSpec());
+        String previewUrl = generatedArtifactSupport.resolvePreviewUrl(
+                sessionState.getAppId(),
+                sessionState.getWorkflowRunId(),
+                codeGenTypeEnum);
+        BrowserVerificationResult browserResult = browserVerificationService.verify(BrowserVerificationRequest.builder()
+                .appId(sessionState.getAppId())
+                .workflowRunId(sessionState.getWorkflowRunId())
+                .codeGenType(codeGenTypeEnum)
+                .generatedCodeDir(sessionState.getCodeArtifact() == null ? null : sessionState.getCodeArtifact().getGeneratedCodeDir())
+                .buildResultDir(localVerification.getBuildResultDir())
+                .previewUrl(previewUrl)
+                .build(), localVerification);
+        return mergeBrowserVerification(localVerification, browserResult);
+    }
+
+    private VerificationArtifact mergeBrowserVerification(VerificationArtifact localVerification,
+                                                          BrowserVerificationResult browserResult) {
+        if (browserResult == null) {
+            return localVerification;
+        }
+        List<String> details = new ArrayList<>(CollUtil.emptyIfNull(localVerification.getDetails()));
+        if (browserResult.isEnabled()) {
+            details.add("浏览器预览地址: " + StrUtil.blankToDefault(browserResult.getPreviewUrl(), "未生成"));
+            details.add("浏览器首屏文本长度: " + Math.max(browserResult.getFirstScreenTextLength(), 0));
+            if (StrUtil.isNotBlank(browserResult.getScreenshotUrl())) {
+                details.add("浏览器截图: " + browserResult.getScreenshotUrl());
+            } else if (StrUtil.isNotBlank(browserResult.getScreenshotPath())) {
+                details.add("浏览器截图: " + browserResult.getScreenshotPath());
+            }
+        } else if (StrUtil.isNotBlank(browserResult.getSummary())) {
+            details.add(browserResult.getSummary());
+        }
+        if (browserResult.isPassed()) {
+            return localVerification.toBuilder()
+                    .details(deduplicate(details))
+                    .browserVerification(browserResult)
+                    .build();
+        }
+        List<String> issues = new ArrayList<>(CollUtil.emptyIfNull(localVerification.getIssues()));
+        issues.addAll(CollUtil.emptyIfNull(browserResult.getIssues()));
+        if (StrUtil.isNotBlank(browserResult.getErrorMessage())) {
+            issues.add(browserResult.getErrorMessage());
+        }
+        issues = deduplicate(issues);
+        String summary = StrUtil.blankToDefault(browserResult.getSummary(), "浏览器验证失败");
+        return localVerification.toBuilder()
+                .passed(false)
+                .details(deduplicate(details))
+                .issues(issues)
+                .summary(summary)
+                .errorMessage(String.join("；", issues))
+                .canFix(!"browser_environment".equals(browserResult.getFailureType()))
+                .failureType(StrUtil.blankToDefault(browserResult.getFailureType(), "browser_check"))
+                .browserVerification(browserResult)
+                .build();
+    }
+
     private VerificationArtifact verifyStaticProject(String generatedCodeDir, CodeGenTypeEnum codeGenTypeEnum) {
         List<String> issues = new ArrayList<>();
         List<String> keyFiles = generatedArtifactSupport.listKeyFiles(generatedCodeDir, 20);
+        List<String> details = new ArrayList<>(keyFiles);
+        details.add(formatArtifactSizeDetail(calculateDirectorySize(generatedCodeDir)));
         if (!generatedArtifactSupport.fileExists(generatedCodeDir, "index.html")) {
             issues.add("缺少入口文件 index.html");
         }
         if (keyFiles.isEmpty()) {
             issues.add("未发现关键代码文件");
+        }
+        if (generatedArtifactSupport.fileExists(generatedCodeDir, "index.html")) {
+            int firstScreenTextLength = calculateFirstScreenTextLength(generatedCodeDir);
+            details.add("首屏文本长度: " + Math.max(firstScreenTextLength, 0));
+            if (firstScreenTextLength <= 0) {
+                issues.add("首屏内容为空: index.html 未发现可见文本");
+            }
         }
         issues.addAll(findMissingStaticReferences(generatedCodeDir));
         issues.addAll(checkJavaScriptSyntax(generatedCodeDir));
@@ -110,7 +213,7 @@ public class BuildVerifyAgent {
                 .buildRequired(false)
                 .passed(passed)
                 .buildResultDir(generatedCodeDir)
-                .details(keyFiles)
+                .details(details)
                 .issues(issues)
                 .summary(summary)
                 .errorMessage(passed ? null : String.join("；", issues))
@@ -133,11 +236,13 @@ public class BuildVerifyAgent {
             issues.add("缺少关键组件 src/App.vue");
         }
         if (!issues.isEmpty()) {
+            List<String> details = new ArrayList<>(generatedArtifactSupport.listKeyFiles(generatedCodeDir, 20));
+            details.add(formatArtifactSizeDetail(calculateDirectorySize(generatedCodeDir)));
             return VerificationArtifact.builder()
                     .buildRequired(true)
                     .passed(false)
                     .buildResultDir(generatedCodeDir)
-                    .details(generatedArtifactSupport.listKeyFiles(generatedCodeDir, 20))
+                    .details(details)
                     .issues(deduplicate(issues))
                     .summary("Vue 项目结构校验失败")
                     .errorMessage(String.join("；", deduplicate(issues)))
@@ -151,13 +256,15 @@ public class BuildVerifyAgent {
                     ? generatedArtifactSupport.resolveBuildResultDir(generatedCodeDir)
                     : generatedCodeDir;
             List<String> buildIssues = buildSuccess ? List.of() : List.of("npm install 或 npm run build 执行失败");
+            List<String> details = new ArrayList<>(buildSuccess
+                    ? generatedArtifactSupport.listKeyFiles(buildResultDir, 20)
+                    : generatedArtifactSupport.listKeyFiles(generatedCodeDir, 20));
+            details.add(formatArtifactSizeDetail(calculateDirectorySize(buildResultDir)));
             return VerificationArtifact.builder()
                     .buildRequired(true)
                     .passed(buildSuccess)
                     .buildResultDir(buildResultDir)
-                    .details(buildSuccess
-                            ? generatedArtifactSupport.listKeyFiles(buildResultDir, 20)
-                            : generatedArtifactSupport.listKeyFiles(generatedCodeDir, 20))
+                    .details(details)
                     .issues(buildIssues)
                     .summary(buildSuccess ? "Vue 项目构建验证通过" : "Vue 项目构建验证失败")
                     .errorMessage(buildSuccess ? null : String.join("；", buildIssues))
@@ -192,13 +299,41 @@ public class BuildVerifyAgent {
                 if (shouldSkipReference(reference)) {
                     continue;
                 }
-                Path resolved = resolveReferencedPath(rootPath, htmlFile.toPath(), reference);
-                if (!Files.exists(resolved)) {
-                    issues.add("静态资源引用不存在: %s -> %s".formatted(relativeHtmlPath, reference));
+                try {
+                    Path resolved = resolveReferencedPath(rootPath, htmlFile.toPath(), reference);
+                    if (!Files.exists(resolved)) {
+                        issues.add("静态资源引用不存在: %s -> %s".formatted(relativeHtmlPath, reference));
+                    }
+                } catch (InvalidPathException e) {
+                    issues.add("静态资源引用路径无效: %s -> %s".formatted(relativeHtmlPath, reference));
                 }
             }
         }
         return deduplicate(issues);
+    }
+
+    private int calculateFirstScreenTextLength(String generatedCodeDir) {
+        File indexFile = Path.of(generatedCodeDir).resolve("index.html").toFile();
+        if (!indexFile.isFile()) {
+            return -1;
+        }
+        String content = FileUtil.readUtf8String(indexFile);
+        String visibleText = content
+                .replaceAll("(?is)<!--.*?-->", " ")
+                .replaceAll("(?is)<script\\b[^>]*>.*?</script>", " ")
+                .replaceAll("(?is)<style\\b[^>]*>.*?</style>", " ")
+                .replaceAll("(?is)<noscript\\b[^>]*>.*?</noscript>", " ")
+                .replaceAll("(?is)<[^>]+>", " ");
+        visibleText = visibleText
+                .replace("&nbsp;", " ")
+                .replace("&#160;", " ")
+                .replace("&amp;", "&")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replaceAll("\\s+", "");
+        return visibleText.length();
     }
 
     private List<String> checkJavaScriptSyntax(String generatedCodeDir) {
@@ -240,12 +375,48 @@ public class BuildVerifyAgent {
         return files;
     }
 
+    private long calculateDirectorySize(String rootDir) {
+        if (!generatedArtifactSupport.directoryExists(rootDir)) {
+            return 0L;
+        }
+        final long[] totalBytes = {0L};
+        FileUtil.walkFiles(new File(rootDir), file -> {
+            if (!file.isFile()) {
+                return;
+            }
+            String normalized = file.getAbsolutePath().replace("\\", "/");
+            if (normalized.contains("/node_modules/")
+                    || normalized.contains("/.git/")) {
+                return;
+            }
+            totalBytes[0] += file.length();
+        });
+        return totalBytes[0];
+    }
+
+    private String formatArtifactSizeDetail(long bytes) {
+        return "产物目录大小: " + formatBytes(bytes);
+    }
+
+    private String formatBytes(long bytes) {
+        if (bytes < 1024) {
+            return bytes + " B";
+        }
+        if (bytes < 1024 * 1024) {
+            return "%.1f KB".formatted(bytes / 1024.0);
+        }
+        return "%.1f MB".formatted(bytes / 1024.0 / 1024.0);
+    }
+
     private String determineStaticFailureType(List<String> issues) {
         if (CollUtil.isEmpty(issues)) {
             return null;
         }
         if (issues.stream().anyMatch(issue -> issue.contains("语法"))) {
             return "syntax";
+        }
+        if (issues.stream().anyMatch(issue -> issue.contains("首屏内容为空"))) {
+            return "first_screen_empty";
         }
         if (issues.stream().anyMatch(issue -> issue.contains("静态资源引用"))) {
             return "reference";
@@ -285,13 +456,20 @@ public class BuildVerifyAgent {
     }
 
     private boolean shouldSkipReference(String reference) {
-        return StrUtil.isBlank(reference)
-                || reference.startsWith("http://")
-                || reference.startsWith("https://")
-                || reference.startsWith("//")
-                || reference.startsWith("data:")
-                || reference.startsWith("mailto:")
-                || reference.startsWith("tel:");
+        if (StrUtil.isBlank(reference)) {
+            return true;
+        }
+        String trimmedReference = reference.trim();
+        String lowerReference = trimmedReference.toLowerCase(Locale.ROOT);
+        return lowerReference.startsWith("#")
+                || lowerReference.startsWith("//")
+                || lowerReference.startsWith("http://")
+                || lowerReference.startsWith("https://")
+                || lowerReference.startsWith("data:")
+                || lowerReference.startsWith("mailto:")
+                || lowerReference.startsWith("tel:")
+                || lowerReference.startsWith("javascript:")
+                || URI_SCHEME_PATTERN.matcher(trimmedReference).find();
     }
 
     private List<String> deduplicate(List<String> items) {

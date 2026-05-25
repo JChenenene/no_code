@@ -3,6 +3,7 @@ package com.lingchuang.ai.service.impl;
 import com.lingchuang.ai.langgraph4j.v2.model.AgentExecutionRecord;
 import com.lingchuang.ai.langgraph4j.v2.model.CodeArtifact;
 import com.lingchuang.ai.langgraph4j.v2.model.FinalArtifact;
+import com.lingchuang.ai.langgraph4j.v2.model.BrowserVerificationResult;
 import com.lingchuang.ai.langgraph4j.v2.model.VerificationArtifact;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowFinalStatus;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowStage;
@@ -24,6 +25,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -69,11 +71,12 @@ class WorkflowPersistenceServiceImplTest {
                 ))
                 .build();
         when(workflowStepMapper.deleteByQuery(any(QueryWrapper.class))).thenReturn(0);
+        when(workflowStepMapper.selectCountByQuery(any(QueryWrapper.class))).thenReturn(0L);
         when(workflowStepMapper.insert(any(WorkflowStep.class))).thenReturn(1);
 
         workflowPersistenceService.saveWorkflowResult(workflowRun, response);
 
-        verify(workflowStepMapper).deleteByQuery(any(QueryWrapper.class));
+        verify(workflowStepMapper).selectCountByQuery(any(QueryWrapper.class));
         verify(workflowStepMapper).insert(argThat(step ->
                 step.getRunId().equals(100L)
                         && step.getStepNumber().equals(1)
@@ -81,6 +84,8 @@ class WorkflowPersistenceServiceImplTest {
                         && "planning".equals(step.getStage())
                         && "succeeded".equals(step.getStatus())
                         && "规划完成".equals(step.getOutputSummary())
+                        && step.getCreateTime() != null
+                        && step.getUpdateTime() != null
         ));
         verify(workflowStepMapper).insert(argThat(step ->
                 step.getRunId().equals(100L)
@@ -89,6 +94,32 @@ class WorkflowPersistenceServiceImplTest {
                         && "verifying".equals(step.getStage())
                         && "failed".equals(step.getStatus())
         ));
+    }
+
+    @Test
+    void shouldNotDuplicateRealtimeWorkflowStepsWhenSavingFinalResult() {
+        WorkflowRun workflowRun = WorkflowRun.builder().id(100L).requestId("req-1").build();
+        WorkflowV2Response response = WorkflowV2Response.builder()
+                .requestId("req-1")
+                .agentTimeline(List.of(
+                        AgentExecutionRecord.builder()
+                                .agentName("RequirementPlannerAgent")
+                                .stage(WorkflowStage.PLANNING)
+                                .status("SUCCESS")
+                                .build(),
+                        AgentExecutionRecord.builder()
+                                .agentName("FinalResponseAgent")
+                                .stage(WorkflowStage.FINALIZING)
+                                .status("SUCCESS")
+                                .build()
+                ))
+                .build();
+        when(workflowStepMapper.selectCountByQuery(any(QueryWrapper.class))).thenReturn(2L);
+
+        workflowPersistenceService.saveWorkflowResult(workflowRun, response);
+
+        verify(workflowStepMapper).selectCountByQuery(any(QueryWrapper.class));
+        verify(workflowStepMapper, never()).insert(any(WorkflowStep.class));
     }
 
     @Test
@@ -111,6 +142,8 @@ class WorkflowPersistenceServiceImplTest {
                         && step.getStepNumber().equals(1)
                         && "RequirementPlannerAgent".equals(step.getAgentName())
                         && "running".equals(step.getStatus())
+                        && step.getCreateTime() != null
+                        && step.getUpdateTime() != null
         ));
     }
 
@@ -153,6 +186,14 @@ class WorkflowPersistenceServiceImplTest {
                         .verificationArtifact(VerificationArtifact.builder()
                                 .passed(true)
                                 .summary("构建通过")
+                                .browserVerification(BrowserVerificationResult.builder()
+                                        .enabled(true)
+                                        .passed(true)
+                                        .previewUrl("http://localhost:8123/api/static/1/100/html/")
+                                        .screenshotPath("D:/tmp/browser-screenshot.jpg")
+                                        .screenshotUrl("/static/1/100/html/verification/browser-screenshot.jpg")
+                                        .summary("浏览器验证通过")
+                                        .build())
                                 .build())
                         .finalArtifact(FinalArtifact.builder()
                                 .finalStatus(WorkflowFinalStatus.SUCCESS)
@@ -161,6 +202,7 @@ class WorkflowPersistenceServiceImplTest {
                         .build())
                 .build();
         when(workflowArtifactMapper.deleteByQuery(any(QueryWrapper.class))).thenReturn(0);
+        when(workflowStepMapper.selectCountByQuery(any(QueryWrapper.class))).thenReturn(0L);
         when(workflowArtifactMapper.insert(any(WorkflowArtifact.class))).thenReturn(1);
 
         workflowPersistenceService.saveWorkflowResult(workflowRun, response);
@@ -171,12 +213,28 @@ class WorkflowPersistenceServiceImplTest {
                         && "code".equals(artifact.getArtifactType())
                         && "代码生成完成".equals(artifact.getSummary())
                         && "D:/tmp/vue_project_1".equals(artifact.getPath())
+                        && artifact.getCreateTime() != null
+                        && artifact.getUpdateTime() != null
         ));
         verify(workflowArtifactMapper).insert(argThat(artifact ->
                 artifact.getRunId().equals(100L)
                         && "verification".equals(artifact.getArtifactType())
                         && "构建通过".equals(artifact.getSummary())
                         && artifact.getJsonContent().contains("\"passed\":true")
+        ));
+        verify(workflowArtifactMapper).insert(argThat(artifact ->
+                artifact.getRunId().equals(100L)
+                        && "browser_verification".equals(artifact.getArtifactType())
+                        && "浏览器验证通过".equals(artifact.getSummary())
+                        && "http://localhost:8123/api/static/1/100/html/".equals(artifact.getUrl())
+                        && artifact.getJsonContent().contains("browser-screenshot.jpg")
+        ));
+        verify(workflowArtifactMapper).insert(argThat(artifact ->
+                artifact.getRunId().equals(100L)
+                        && "verification_screenshot".equals(artifact.getArtifactType())
+                        && "浏览器验证截图".equals(artifact.getSummary())
+                        && "D:/tmp/browser-screenshot.jpg".equals(artifact.getPath())
+                        && "/static/1/100/html/verification/browser-screenshot.jpg".equals(artifact.getUrl())
         ));
         verify(workflowArtifactMapper).insert(argThat(artifact ->
                 artifact.getRunId().equals(100L)
@@ -199,5 +257,28 @@ class WorkflowPersistenceServiceImplTest {
         assertEquals(workflowRun, detail.getRun());
         assertEquals(steps, detail.getSteps());
         assertEquals(artifacts, detail.getArtifacts());
+    }
+
+    @Test
+    void shouldPersistRetryParentArtifact() {
+        WorkflowRun retryRun = WorkflowRun.builder().id(101L).requestId("retry-req").build();
+        WorkflowRun parentRun = WorkflowRun.builder()
+                .id(100L)
+                .requestId("parent-req")
+                .status("failed")
+                .prompt("生成 HTML")
+                .build();
+        when(workflowArtifactMapper.insert(any(WorkflowArtifact.class))).thenReturn(1);
+
+        workflowPersistenceService.saveRetryParentArtifact(retryRun, parentRun);
+
+        verify(workflowArtifactMapper).insert(argThat(artifact ->
+                artifact.getRunId().equals(101L)
+                        && "retry_parent".equals(artifact.getArtifactType())
+                        && artifact.getSummary().contains("100")
+                        && artifact.getJsonContent().contains("\"parentRunId\":100")
+                        && artifact.getCreateTime() != null
+                        && artifact.getUpdateTime() != null
+        ));
     }
 }

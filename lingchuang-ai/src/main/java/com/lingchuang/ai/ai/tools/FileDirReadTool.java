@@ -72,7 +72,7 @@ public class FileDirReadTool extends BaseTool {
                     .forEach(file -> {
                         int depth = getRelativeDepth(targetDir, file);
                         String indent = "  ".repeat(depth);
-                        structure.append(indent).append(file.getName());
+                        structure.append(indent).append(file.getName()).append('\n');
                     });
             return structure.toString();
         } catch (IllegalArgumentException e) {

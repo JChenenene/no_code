@@ -38,6 +38,7 @@ public class HybridKnowledgeContentInjector implements ContentInjector {
         String augmentedPrompt = RagPromptSupport.buildAugmentedPrompt(
                 effectiveUserPrompt,
                 invocationContext.getRecentHistories(),
+                invocationContext.getMemorySummary(),
                 invocationContext.getCodeGenType(),
                 CollUtil.isEmpty(contents)
                         ? List.of()

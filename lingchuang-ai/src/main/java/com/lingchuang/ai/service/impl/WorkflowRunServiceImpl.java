@@ -54,6 +54,9 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper, Workf
         if (workflowRun == null) {
             return;
         }
+        if (WorkflowRunStatusEnum.CANCELLED.getValue().equals(workflowRun.getStatus())) {
+            return;
+        }
         workflowRun.setStatus(WorkflowRunStatusEnum.SUCCEEDED.getValue());
         workflowRun.setLastResponseJson(responseJson);
         workflowRun.setFinishedTime(LocalDateTime.now());
@@ -65,10 +68,34 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper, Workf
         if (workflowRun == null) {
             return;
         }
+        if (WorkflowRunStatusEnum.CANCELLED.getValue().equals(workflowRun.getStatus())) {
+            return;
+        }
         workflowRun.setStatus(WorkflowRunStatusEnum.FAILED.getValue());
         workflowRun.setErrorMessage(StrUtil.blankToDefault(errorMessage, "V2 工作流执行失败"));
         workflowRun.setFinishedTime(LocalDateTime.now());
         this.updateById(workflowRun);
+    }
+
+    @Override
+    public boolean cancelRun(WorkflowRun workflowRun, String reason) {
+        if (workflowRun == null || workflowRun.getId() == null
+                || !WorkflowRunStatusEnum.RUNNING.getValue().equals(workflowRun.getStatus())) {
+            return false;
+        }
+        workflowRun.setStatus(WorkflowRunStatusEnum.CANCELLED.getValue());
+        workflowRun.setErrorMessage(StrUtil.blankToDefault(reason, "用户取消 V2 工作流"));
+        workflowRun.setFinishedTime(LocalDateTime.now());
+        return this.updateById(workflowRun);
+    }
+
+    @Override
+    public boolean isCancelled(Long runId) {
+        if (runId == null || runId <= 0) {
+            return false;
+        }
+        WorkflowRun workflowRun = this.getById(runId);
+        return workflowRun != null && WorkflowRunStatusEnum.CANCELLED.getValue().equals(workflowRun.getStatus());
     }
 
     @Override
@@ -87,6 +114,17 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper, Workf
                 .eq("appId", appId)
                 .eq("userId", userId)
                 .eq("status", WorkflowRunStatusEnum.SUCCEEDED.getValue())
+                .orderBy("createTime", false)
+                .limit(1);
+        return this.getOne(queryWrapper);
+    }
+
+    @Override
+    public WorkflowRun getRunningRun(Long appId, Long userId) {
+        QueryWrapper queryWrapper = QueryWrapper.create()
+                .eq("appId", appId)
+                .eq("userId", userId)
+                .eq("status", WorkflowRunStatusEnum.RUNNING.getValue())
                 .orderBy("createTime", false)
                 .limit(1);
         return this.getOne(queryWrapper);

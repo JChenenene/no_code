@@ -9,6 +9,7 @@ import com.lingchuang.ai.model.entity.User;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 对话历史服务层。
@@ -56,6 +57,11 @@ public interface ChatHistoryService extends IService<ChatHistory> {
      * @return 加载成功的条数
      */
     int loadChatHistoryToMemory(Long appId, MessageWindowChatMemory chatMemory, int maxCount);
+
+    /**
+     * 查询最近对话历史，不包含权限校验，供内部 RAG 和摘要压缩使用。
+     */
+    List<ChatHistory> listRecentHistories(Long appId, Long userId, int maxCount);
 
     /**
      * 构造查询条件

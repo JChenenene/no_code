@@ -19,6 +19,8 @@ import com.lingchuang.ai.langgraph4j.v2.model.TaskSpec;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowFinalStatus;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowStage;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowV2Response;
+import com.lingchuang.ai.langgraph4j.v2.runtime.WorkflowCancelToken;
+import com.lingchuang.ai.langgraph4j.v2.runtime.WorkflowCancelledException;
 import com.lingchuang.ai.langgraph4j.v2.service.WorkflowV2ResponseMapper;
 import com.lingchuang.ai.langgraph4j.v2.state.AgentSessionState;
 import lombok.RequiredArgsConstructor;
@@ -130,7 +132,7 @@ public class CodeGenWorkflowV2 {
     }
 
     public WorkflowV2Response executeWorkflow(String originalPrompt, Long appId, String requestId) {
-        return executeWorkflow(originalPrompt, appId, requestId, null, null);
+        return executeWorkflow(originalPrompt, appId, requestId, null, null, null);
     }
 
     public WorkflowV2Response executeWorkflow(String originalPrompt,
@@ -138,10 +140,22 @@ public class CodeGenWorkflowV2 {
                                               String requestId,
                                               Long workflowRunId,
                                               String workspacePath) {
+        return executeWorkflow(originalPrompt, appId, requestId, workflowRunId, workspacePath, null);
+    }
+
+    public WorkflowV2Response executeWorkflow(String originalPrompt,
+                                              Long appId,
+                                              String requestId,
+                                              Long workflowRunId,
+                                              String workspacePath,
+                                              WorkflowCancelToken cancelToken) {
         AgentSessionState initialState = createInitialState(originalPrompt, appId, requestId, workflowRunId, workspacePath);
         try {
-            AgentSessionState finalState = executeWorkflowInternal(initialState, null);
+            AgentSessionState finalState = executeWorkflowInternal(initialState, null, cancelToken);
             return workflowV2ResponseMapper.toResponse(finalState);
+        } catch (WorkflowCancelledException e) {
+            log.info("requestId={}, V2 工作流已取消: {}", initialState.getRequestId(), e.getMessage());
+            return workflowV2ResponseMapper.toResponse(buildErrorState(initialState, e));
         } catch (Exception e) {
             log.error("requestId={}, V2 工作流执行失败: {}", initialState.getRequestId(), e.getMessage(), e);
             return workflowV2ResponseMapper.toResponse(buildErrorState(initialState, e));
@@ -157,7 +171,7 @@ public class CodeGenWorkflowV2 {
     }
 
     public Flux<String> executeWorkflowWithFlux(String originalPrompt, Long appId, String requestId) {
-        return executeWorkflowWithFlux(originalPrompt, appId, requestId, null, null);
+        return executeWorkflowWithFlux(originalPrompt, appId, requestId, null, null, null);
     }
 
     public Flux<String> executeWorkflowWithFlux(String originalPrompt,
@@ -165,6 +179,15 @@ public class CodeGenWorkflowV2 {
                                                 String requestId,
                                                 Long workflowRunId,
                                                 String workspacePath) {
+        return executeWorkflowWithFlux(originalPrompt, appId, requestId, workflowRunId, workspacePath, null);
+    }
+
+    public Flux<String> executeWorkflowWithFlux(String originalPrompt,
+                                                Long appId,
+                                                String requestId,
+                                                Long workflowRunId,
+                                                String workspacePath,
+                                                WorkflowCancelToken cancelToken) {
         return Flux.create(sink -> Thread.startVirtualThread(() -> {
             AgentSessionState initialState = createInitialState(originalPrompt, appId, requestId, workflowRunId, workspacePath);
             try {
@@ -188,8 +211,16 @@ public class CodeGenWorkflowV2 {
                             "currentStage", currentState.getCurrentStage(),
                             "attemptCount", currentState.getAttemptCount()
                     )));
-                });
+                }, cancelToken);
                 sink.next(formatSseEvent("workflow_completed", workflowV2ResponseMapper.toResponse(finalState)));
+                sink.complete();
+            } catch (WorkflowCancelledException e) {
+                log.info("requestId={}, V2 Flux 工作流已取消: {}", initialState.getRequestId(), e.getMessage());
+                sink.next(formatSseEvent("workflow_cancelled", Map.of(
+                        "requestId", initialState.getRequestId(),
+                        "error", e.getMessage(),
+                        "message", "V2 工作流已取消"
+                )));
                 sink.complete();
             } catch (Exception e) {
                 log.error("requestId={}, V2 Flux 工作流执行失败: {}", initialState.getRequestId(), e.getMessage(), e);
@@ -212,7 +243,7 @@ public class CodeGenWorkflowV2 {
     }
 
     public SseEmitter executeWorkflowWithSse(String originalPrompt, Long appId, String requestId) {
-        return executeWorkflowWithSse(originalPrompt, appId, requestId, null, null);
+        return executeWorkflowWithSse(originalPrompt, appId, requestId, null, null, null);
     }
 
     public SseEmitter executeWorkflowWithSse(String originalPrompt,
@@ -220,6 +251,15 @@ public class CodeGenWorkflowV2 {
                                              String requestId,
                                              Long workflowRunId,
                                              String workspacePath) {
+        return executeWorkflowWithSse(originalPrompt, appId, requestId, workflowRunId, workspacePath, null);
+    }
+
+    public SseEmitter executeWorkflowWithSse(String originalPrompt,
+                                             Long appId,
+                                             String requestId,
+                                             Long workflowRunId,
+                                             String workspacePath,
+                                             WorkflowCancelToken cancelToken) {
         SseEmitter emitter = new SseEmitter(30 * 60 * 1000L);
         Thread.startVirtualThread(() -> {
             AgentSessionState initialState = createInitialState(originalPrompt, appId, requestId, workflowRunId, workspacePath);
@@ -244,8 +284,16 @@ public class CodeGenWorkflowV2 {
                             "currentStage", currentState.getCurrentStage(),
                             "attemptCount", currentState.getAttemptCount()
                     ));
-                });
+                }, cancelToken);
                 sendSseEvent(emitter, "workflow_completed", workflowV2ResponseMapper.toResponse(finalState));
+                emitter.complete();
+            } catch (WorkflowCancelledException e) {
+                log.info("requestId={}, V2 SSE 工作流已取消: {}", initialState.getRequestId(), e.getMessage());
+                sendSseEvent(emitter, "workflow_cancelled", Map.of(
+                        "requestId", initialState.getRequestId(),
+                        "error", e.getMessage(),
+                        "message", "V2 工作流已取消"
+                ));
                 emitter.complete();
             } catch (Exception e) {
                 log.error("requestId={}, V2 SSE 工作流执行失败: {}", initialState.getRequestId(), e.getMessage(), e);
@@ -261,7 +309,8 @@ public class CodeGenWorkflowV2 {
     }
 
     private AgentSessionState executeWorkflowInternal(AgentSessionState initialState,
-                                                      BiConsumer<Integer, AgentSessionState> stepConsumer) {
+                                                      BiConsumer<Integer, AgentSessionState> stepConsumer,
+                                                      WorkflowCancelToken cancelToken) {
         CompiledGraph<MessagesState<String>> workflow = createWorkflow();
         GraphRepresentation graphRepresentation = workflow.getGraph(GraphRepresentation.Type.MERMAID);
         log.info("V2 工作流图:\n{}", graphRepresentation.content());
@@ -279,6 +328,7 @@ public class CodeGenWorkflowV2 {
         try {
             for (NodeOutput<MessagesState<String>> step : workflow.stream(
                     Map.of(AgentSessionState.STATE_KEY, initialState), runnableConfig)) {
+                throwIfCancelled(cancelToken);
                 AgentSessionState currentState = AgentSessionState.getState(step.state());
                 if (currentState != null) {
                     finalState = currentState;
@@ -288,12 +338,19 @@ public class CodeGenWorkflowV2 {
                         stepConsumer.accept(stepCounter, currentState);
                     }
                 }
+                throwIfCancelled(cancelToken);
                 stepCounter++;
             }
         } finally {
             parallelPreparationExecutor.shutdown();
         }
         return finalState;
+    }
+
+    private void throwIfCancelled(WorkflowCancelToken cancelToken) {
+        if (cancelToken != null) {
+            cancelToken.throwIfCancelled();
+        }
     }
 
     private AgentSessionState createInitialState(String originalPrompt, Long appId) {

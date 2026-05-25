@@ -12,9 +12,11 @@ import com.lingchuang.ai.model.entity.WorkflowRun;
 import com.lingchuang.ai.model.entity.WorkflowStep;
 import com.lingchuang.ai.model.enums.ChatHistoryMessageTypeEnum;
 import com.lingchuang.ai.model.enums.CodeGenTypeEnum;
+import com.lingchuang.ai.model.enums.WorkflowRunStatusEnum;
 import com.lingchuang.ai.model.vo.WorkflowRunDetailVO;
 import com.lingchuang.ai.langgraph4j.v2.service.GeneratedArtifactSupport;
 import com.lingchuang.ai.rag.RagInvocationContext;
+import com.lingchuang.ai.service.AppChatSummaryService;
 import com.lingchuang.ai.service.ChatHistoryService;
 import com.lingchuang.ai.service.ProjectDownloadService;
 import com.lingchuang.ai.service.ScreenshotService;
@@ -42,6 +44,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -57,6 +60,9 @@ class AppServiceImplRagTest {
 
     @Mock
     private ChatHistoryService chatHistoryService;
+
+    @Mock
+    private AppChatSummaryService appChatSummaryService;
 
     @Mock
     private StreamHandlerExecutor streamHandlerExecutor;
@@ -97,6 +103,8 @@ class AppServiceImplRagTest {
         doReturn(app).when(appService).getById(1L);
         when(chatHistoryService.listAppChatHistoryByPage(1L, 4, null, loginUser))
                 .thenReturn(historyPage);
+        when(appChatSummaryService.getLatestSummaryText(1L, 1L))
+                .thenReturn("用户偏好：页面主角叫小范");
         when(aiCodeGeneratorFacade.generateAndSaveCodeStream("原始需求", CodeGenTypeEnum.HTML, 1L))
                 .thenAnswer(invocation -> {
                     RagInvocationContext context = RagInvocationContext.getCurrent();
@@ -104,6 +112,7 @@ class AppServiceImplRagTest {
                     Assertions.assertEquals(1L, context.getAppId());
                     Assertions.assertEquals(CodeGenTypeEnum.HTML, context.getCodeGenType());
                     Assertions.assertEquals(histories, context.getRecentHistories());
+                    Assertions.assertEquals("用户偏好：页面主角叫小范", context.getMemorySummary());
                     return codeStream;
                 });
         when(streamHandlerExecutor.doExecute(codeStream, chatHistoryService, 1L, loginUser, CodeGenTypeEnum.HTML))
@@ -279,6 +288,154 @@ class AppServiceImplRagTest {
         Assertions.assertEquals(detail, appService.getWorkflowRunDetail(10L, loginUser));
         Assertions.assertEquals(steps, appService.listWorkflowRunSteps(10L, loginUser));
         Assertions.assertEquals(artifacts, appService.listWorkflowRunArtifacts(10L, loginUser));
+    }
+
+    @Test
+    void shouldRejectNewV2WorkflowWhenAppAlreadyHasRunningRun() {
+        App app = App.builder().id(1L).userId(1L).codeGenType(CodeGenTypeEnum.HTML.getValue()).build();
+        User loginUser = User.builder().id(1L).build();
+        WorkflowRun runningRun = WorkflowRun.builder()
+                .id(10L)
+                .status(WorkflowRunStatusEnum.RUNNING.getValue())
+                .build();
+
+        doReturn(app).when(appService).getById(1L);
+        when(workflowRunService.getRunningRun(1L, 1L)).thenReturn(runningRun);
+
+        Assertions.assertThrows(com.lingchuang.ai.exception.BusinessException.class,
+                () -> appService.chatToGenCodeV2(1L, "再次生成", loginUser));
+    }
+
+    @Test
+    void shouldNotMarkCancelledWorkflowRunSucceededAfterFluxCompletes() {
+        App app = App.builder().id(1L).userId(1L).codeGenType(CodeGenTypeEnum.HTML.getValue()).build();
+        User loginUser = User.builder().id(1L).build();
+        WorkflowRun workflowRun = WorkflowRun.builder()
+                .id(10L)
+                .requestId("req-1")
+                .status(WorkflowRunStatusEnum.RUNNING.getValue())
+                .build();
+        String completedEvent = """
+                event: workflow_completed
+                data: {"requestId":"req-1","finalStatus":"SUCCESS","verificationSummary":"验证通过","agentTimeline":[],"artifacts":{"finalArtifact":{"finalStatus":"SUCCESS","summary":"执行成功"}}}
+
+                """;
+
+        doReturn(app).when(appService).getById(1L);
+        when(workflowRunService.getRunningRun(1L, 1L)).thenReturn(null);
+        when(workflowRunService.createRunningRun(1L, 1L, "生成 HTML", CodeGenTypeEnum.HTML.getValue()))
+                .thenReturn(workflowRun);
+        when(generatedArtifactSupport.resolveRunWorkspaceDir(CodeGenTypeEnum.HTML, 1L, 10L))
+                .thenReturn("D:/tmp/code_output/1/10/html");
+        when(generatedArtifactSupport.resolvePreviewUrl(1L, 10L, CodeGenTypeEnum.HTML))
+                .thenReturn("/static/1/10/html/index.html");
+        when(workflowRuntimeService.executeWorkflowV2WithFlux(
+                "生成 HTML",
+                1L,
+                "req-1",
+                10L,
+                "D:/tmp/code_output/1/10/html"
+        )).thenReturn(Flux.just(completedEvent));
+        when(workflowRunService.isCancelled(10L)).thenReturn(true);
+
+        appService.chatToGenCodeV2(1L, "生成 HTML", loginUser).collectList().block();
+
+        org.mockito.Mockito.verify(workflowRunService, org.mockito.Mockito.never()).markSucceeded(eq(workflowRun), anyString());
+        org.mockito.Mockito.verify(chatHistoryService, org.mockito.Mockito.never())
+                .addChatMessage(eq(1L), anyString(), eq(ChatHistoryMessageTypeEnum.AI.getValue()), eq(1L));
+    }
+
+    @Test
+    void shouldCancelRuntimeJobWhenCancellingWorkflowRun() {
+        User loginUser = User.builder().id(1L).build();
+        WorkflowRun workflowRun = WorkflowRun.builder()
+                .id(10L)
+                .userId(1L)
+                .status(WorkflowRunStatusEnum.RUNNING.getValue())
+                .build();
+
+        when(workflowRunService.getById(10L)).thenReturn(workflowRun);
+        when(workflowRunService.cancelRun(workflowRun, "用户取消 V2 工作流")).thenReturn(true);
+        when(workflowRuntimeService.cancelWorkflowJob(10L, "用户取消 V2 工作流")).thenReturn(true);
+
+        Assertions.assertTrue(appService.cancelWorkflowRun(10L, loginUser));
+
+        verify(workflowRuntimeService).cancelWorkflowJob(10L, "用户取消 V2 工作流");
+    }
+
+    @Test
+    void shouldRetryFailedWorkflowRunWithNewRunWorkspace() {
+        App app = App.builder().id(1L).userId(1L).codeGenType(CodeGenTypeEnum.HTML.getValue()).build();
+        User loginUser = User.builder().id(1L).build();
+        WorkflowRun failedRun = WorkflowRun.builder()
+                .id(10L)
+                .appId(1L)
+                .userId(1L)
+                .prompt("生成 HTML")
+                .codeGenType(CodeGenTypeEnum.HTML.getValue())
+                .status(WorkflowRunStatusEnum.FAILED.getValue())
+                .build();
+        WorkflowRun retryRun = WorkflowRun.builder()
+                .id(11L)
+                .requestId("req-retry")
+                .appId(1L)
+                .userId(1L)
+                .prompt("生成 HTML")
+                .codeGenType(CodeGenTypeEnum.HTML.getValue())
+                .status(WorkflowRunStatusEnum.RUNNING.getValue())
+                .build();
+        String completedEvent = """
+                event: workflow_completed
+                data: {"requestId":"req-retry","finalStatus":"SUCCESS","verificationSummary":"验证通过","agentTimeline":[],"artifacts":{"finalArtifact":{"finalStatus":"SUCCESS","summary":"执行成功"}}}
+
+                """;
+
+        doReturn(app).when(appService).getById(1L);
+        when(workflowRunService.getById(10L)).thenReturn(failedRun);
+        when(workflowRunService.getRunningRun(1L, 1L)).thenReturn(null);
+        when(workflowRunService.createRunningRun(1L, 1L, "生成 HTML", CodeGenTypeEnum.HTML.getValue()))
+                .thenReturn(retryRun);
+        when(generatedArtifactSupport.resolveRunWorkspaceDir(CodeGenTypeEnum.HTML, 1L, 11L))
+                .thenReturn("D:/tmp/code_output/1/11/html");
+        when(generatedArtifactSupport.resolvePreviewUrl(1L, 11L, CodeGenTypeEnum.HTML))
+                .thenReturn("/static/1/11/html/index.html");
+        when(workflowRuntimeService.executeWorkflowV2WithFlux(
+                "生成 HTML",
+                1L,
+                "req-retry",
+                11L,
+                "D:/tmp/code_output/1/11/html"
+        )).thenReturn(Flux.just(completedEvent));
+
+        List<String> chunks = appService.retryWorkflowRun(10L, loginUser).collectList().block();
+
+        Assertions.assertEquals(1, chunks.size());
+        Assertions.assertTrue(chunks.get(0).contains("\"runId\":11"));
+        verify(workflowPersistenceService).saveRetryParentArtifact(retryRun, failedRun);
+        verify(workflowRuntimeService).registerWorkflowJob(11L, "req-retry");
+        verify(workflowRunService).attachWorkspace(
+                retryRun,
+                "D:/tmp/code_output/1/11/html",
+                "/static/1/11/html/index.html"
+        );
+        verify(workflowRunService).markSucceeded(eq(retryRun), anyString());
+    }
+
+    @Test
+    void shouldRejectRetryForRunningWorkflowRun() {
+        User loginUser = User.builder().id(1L).build();
+        WorkflowRun runningRun = WorkflowRun.builder()
+                .id(10L)
+                .appId(1L)
+                .userId(1L)
+                .status(WorkflowRunStatusEnum.RUNNING.getValue())
+                .build();
+
+        when(workflowRunService.getById(10L)).thenReturn(runningRun);
+
+        Assertions.assertThrows(com.lingchuang.ai.exception.BusinessException.class,
+                () -> appService.retryWorkflowRun(10L, loginUser));
+        verify(workflowRunService, never()).createRunningRun(any(), any(), anyString(), anyString());
     }
 
     @Test

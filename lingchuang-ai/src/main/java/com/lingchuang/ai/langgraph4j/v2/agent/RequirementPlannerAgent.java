@@ -82,6 +82,7 @@ public class RequirementPlannerAgent {
         if (candidates.isEmpty()) {
             candidates.add(codeGenTypeEnum.getValue());
         }
+        List<String> requiredSkills = resolveRequiredSkills(safeTaskSpec, originalPrompt, codeGenTypeEnum);
         return TaskSpec.builder()
                 .originalPrompt(originalPrompt)
                 .goal(StrUtil.blankToDefault(safeTaskSpec.getGoal(), originalPrompt))
@@ -90,6 +91,7 @@ public class RequirementPlannerAgent {
                 .acceptanceCriteria(CollUtil.isEmpty(safeTaskSpec.getAcceptanceCriteria())
                         ? List.of("生成结果应与需求一致", "输出应可直接运行或继续构建验证")
                         : safeTaskSpec.getAcceptanceCriteria())
+                .requiredSkills(requiredSkills)
                 .codeGenTypeCandidates(candidates)
                 .targetCodeGenType(codeGenTypeEnum.getValue())
                 .needsRetrieval(resolveNeedsRetrieval(safeTaskSpec, originalPrompt, codeGenTypeEnum))
@@ -106,6 +108,7 @@ public class RequirementPlannerAgent {
                 .pageScope("未明确")
                 .technicalConstraints(List.of())
                 .acceptanceCriteria(List.of("生成结果应与需求一致", "输出应可直接运行或继续构建验证"))
+                .requiredSkills(resolveRequiredSkills(null, originalPrompt, codeGenTypeEnum))
                 .codeGenTypeCandidates(List.of(codeGenTypeEnum.getValue()))
                 .targetCodeGenType(codeGenTypeEnum.getValue())
                 .needsRetrieval(resolveNeedsRetrieval(null, originalPrompt, codeGenTypeEnum))
@@ -176,11 +179,48 @@ public class RequirementPlannerAgent {
         return codeGenTypeEnum == CodeGenTypeEnum.MULTI_FILE ? "standard" : "basic";
     }
 
+    private List<String> resolveRequiredSkills(TaskSpec taskSpec, String originalPrompt, CodeGenTypeEnum codeGenTypeEnum) {
+        List<String> requiredSkills = new ArrayList<>();
+        if (taskSpec != null && CollUtil.isNotEmpty(taskSpec.getRequiredSkills())) {
+            for (String requiredSkill : taskSpec.getRequiredSkills()) {
+                addSkillIfAbsent(requiredSkills, requiredSkill);
+            }
+        }
+        if (codeGenTypeEnum == CodeGenTypeEnum.VUE_PROJECT) {
+            addSkillIfAbsent(requiredSkills, "vue-project");
+        }
+        if (resolveNeedsAssetPlanning(taskSpec, originalPrompt, codeGenTypeEnum)) {
+            addSkillIfAbsent(requiredSkills, "asset-collection");
+        }
+        String combinedText = buildCombinedText(taskSpec, originalPrompt);
+        if (containsAny(combinedText, "页面", "首页", "视觉", "设计", "美化", "ui", "layout", "responsive", "自我介绍")) {
+            addSkillIfAbsent(requiredSkills, "design-ui");
+        }
+        if (containsAny(combinedText, "部署", "上线", "预览", "download", "deploy", "发布")) {
+            addSkillIfAbsent(requiredSkills, "deployment");
+        }
+        return requiredSkills;
+    }
+
+    private void addSkillIfAbsent(List<String> requiredSkills, String skillId) {
+        String normalizedSkillId = StrUtil.blankToDefault(skillId, "")
+                .trim()
+                .toLowerCase()
+                .replace('_', '-');
+        if (StrUtil.isBlank(normalizedSkillId) || requiredSkills.contains(normalizedSkillId)) {
+            return;
+        }
+        requiredSkills.add(normalizedSkillId);
+    }
+
     private String buildCombinedText(TaskSpec taskSpec, String originalPrompt) {
         StringBuilder builder = new StringBuilder(StrUtil.blankToDefault(originalPrompt, ""));
         if (taskSpec != null) {
             builder.append('\n').append(StrUtil.blankToDefault(taskSpec.getGoal(), ""));
             builder.append('\n').append(StrUtil.blankToDefault(taskSpec.getPageScope(), ""));
+            if (CollUtil.isNotEmpty(taskSpec.getRequiredSkills())) {
+                builder.append('\n').append(String.join(" ", taskSpec.getRequiredSkills()));
+            }
             if (CollUtil.isNotEmpty(taskSpec.getTechnicalConstraints())) {
                 builder.append('\n').append(String.join(" ", taskSpec.getTechnicalConstraints()));
             }

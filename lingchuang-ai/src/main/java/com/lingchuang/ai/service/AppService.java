@@ -57,6 +57,21 @@ public interface AppService extends IService<App> {
     WorkflowRunDetailVO getWorkflowRunDetail(Long runId, User loginUser);
 
     /**
+     * 查询当前用户可访问的指定 V2 工作流运行状态。
+     */
+    WorkflowRun getWorkflowRunStatus(Long runId, User loginUser);
+
+    /**
+     * 取消当前用户可访问的运行中 V2 工作流。
+     */
+    boolean cancelWorkflowRun(Long runId, User loginUser);
+
+    /**
+     * 基于失败或已取消的 V2 工作流重新发起一次完整生成。
+     */
+    Flux<String> retryWorkflowRun(Long runId, User loginUser);
+
+    /**
      * 查询指定 V2 工作流运行的步骤时间线。
      */
     List<WorkflowStep> listWorkflowRunSteps(Long runId, User loginUser);

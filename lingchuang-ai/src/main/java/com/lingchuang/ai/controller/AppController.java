@@ -171,6 +171,34 @@ public class AppController {
         return ResultUtils.success(appService.getWorkflowRunDetail(runId, loginUser));
     }
 
+    @GetMapping("/workflow/{runId}/status")
+    public BaseResponse<WorkflowRun> getWorkflowRunStatus(@PathVariable Long runId, HttpServletRequest request) {
+        ThrowUtils.throwIf(runId == null || runId <= 0, ErrorCode.PARAMS_ERROR, "工作流运行 id 错误");
+        User loginUser = userService.getLoginUser(request);
+        return ResultUtils.success(appService.getWorkflowRunStatus(runId, loginUser));
+    }
+
+    @PostMapping("/workflow/{runId}/cancel")
+    public BaseResponse<Boolean> cancelWorkflowRun(@PathVariable Long runId, HttpServletRequest request) {
+        ThrowUtils.throwIf(runId == null || runId <= 0, ErrorCode.PARAMS_ERROR, "工作流运行 id 错误");
+        User loginUser = userService.getLoginUser(request);
+        return ResultUtils.success(appService.cancelWorkflowRun(runId, loginUser));
+    }
+
+    @GetMapping(value = "/workflow/{runId}/retry", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<String>> retryWorkflowRun(@PathVariable Long runId, HttpServletRequest request) {
+        ThrowUtils.throwIf(runId == null || runId <= 0, ErrorCode.PARAMS_ERROR, "工作流运行 id 错误");
+        User loginUser = userService.getLoginUser(request);
+        return appService.retryWorkflowRun(runId, loginUser)
+                .map(this::parseRawWorkflowSseEvent)
+                .concatWith(Mono.just(
+                        ServerSentEvent.<String>builder()
+                                .event("done")
+                                .data("")
+                                .build()
+                ));
+    }
+
     @GetMapping("/workflow/{runId}/steps")
     public BaseResponse<List<WorkflowStep>> listWorkflowRunSteps(@PathVariable Long runId, HttpServletRequest request) {
         ThrowUtils.throwIf(runId == null || runId <= 0, ErrorCode.PARAMS_ERROR, "工作流运行 id 错误");

@@ -35,6 +35,8 @@ public class RagPromptAugmentor {
         if (!ragProperties.isEnabled()) {
             return latestUserMessage;
         }
+        RagInvocationContext invocationContext = RagInvocationContext.getCurrent();
+        String memorySummary = invocationContext == null ? "" : StrUtil.trimToEmpty(invocationContext.getMemorySummary());
         RetrievalPromptExpansionOutcome expansionOutcome = retrievalPromptExpansionService.expandForUserRequest(
                 latestUserMessage,
                 recentHistories,
@@ -60,6 +62,7 @@ public class RagPromptAugmentor {
         return RagPromptSupport.buildAugmentedPrompt(
                 effectiveUserPrompt,
                 recentHistories,
+                memorySummary,
                 codeGenType,
                 retrievalResult.getRerankedResults()
         );

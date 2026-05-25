@@ -21,6 +21,11 @@ public class ToolPathResolver {
             "application.yml", "application-local.yml", "application-prod.yml"
     );
 
+    private static final Set<String> WRITABLE_EXTENSIONS = Set.of(
+            ".html", ".css", ".js", ".ts", ".vue", ".json", ".md",
+            ".svg", ".png", ".jpg", ".jpeg", ".webp"
+    );
+
     private static final Map<Long, Path> WORKSPACE_ROOTS = new ConcurrentHashMap<>();
 
     public Path resolveForWrite(String relativePath, Long appId) {
@@ -69,8 +74,11 @@ public class ToolPathResolver {
         if (!resolvedPath.startsWith(workspaceRoot)) {
             throw new IllegalArgumentException("文件路径不允许访问项目目录之外");
         }
-        if (writeMode && isSensitiveFile(resolvedPath)) {
-            throw new IllegalArgumentException("不允许写入敏感文件");
+        if (isSensitiveFile(resolvedPath)) {
+            throw new IllegalArgumentException(writeMode ? "不允许写入敏感文件" : "不允许读取敏感文件");
+        }
+        if (writeMode && !hasWritableExtension(resolvedPath)) {
+            throw new IllegalArgumentException("不允许写入该类型文件");
         }
         return resolvedPath;
     }
@@ -83,5 +91,18 @@ public class ToolPathResolver {
         String normalizedFileName = fileName.toString().toLowerCase();
         return normalizedFileName.startsWith(".")
                 || SENSITIVE_FILE_NAMES.contains(normalizedFileName);
+    }
+
+    private boolean hasWritableExtension(Path path) {
+        Path fileName = path.getFileName();
+        if (fileName == null) {
+            return false;
+        }
+        String normalizedFileName = fileName.toString().toLowerCase();
+        int dotIndex = normalizedFileName.lastIndexOf('.');
+        if (dotIndex < 0) {
+            return false;
+        }
+        return WRITABLE_EXTENSIONS.contains(normalizedFileName.substring(dotIndex));
     }
 }

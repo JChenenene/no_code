@@ -15,7 +15,13 @@ public interface WorkflowRunService extends IService<WorkflowRun> {
 
     void markFailed(WorkflowRun workflowRun, String errorMessage);
 
+    boolean cancelRun(WorkflowRun workflowRun, String reason);
+
+    boolean isCancelled(Long runId);
+
     WorkflowRun getLatestRun(Long appId, Long userId);
 
     WorkflowRun getLatestSucceededRun(Long appId, Long userId);
+
+    WorkflowRun getRunningRun(Long appId, Long userId);
 }

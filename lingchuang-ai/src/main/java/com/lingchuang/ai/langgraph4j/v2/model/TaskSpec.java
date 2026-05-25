@@ -49,6 +49,12 @@ public class TaskSpec implements Serializable {
     private List<String> acceptanceCriteria = List.of();
 
     /**
+     * 当前任务需要按需加载的 Skill。
+     */
+    @Builder.Default
+    private List<String> requiredSkills = List.of();
+
+    /**
      * 候选代码生成类型。
      */
     @Builder.Default

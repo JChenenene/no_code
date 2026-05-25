@@ -4,7 +4,9 @@ import cn.hutool.core.collection.CollUtil;
 import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONUtil;
 import com.lingchuang.ai.langgraph4j.v2.model.AgentExecutionRecord;
+import com.lingchuang.ai.langgraph4j.v2.model.BrowserVerificationResult;
 import com.lingchuang.ai.langgraph4j.v2.model.CodeArtifact;
+import com.lingchuang.ai.langgraph4j.v2.model.VerificationArtifact;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowV2Artifacts;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowV2Response;
 import com.lingchuang.ai.mapper.WorkflowArtifactMapper;
@@ -18,9 +20,12 @@ import com.mybatisflex.core.query.QueryWrapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * V2 工作流步骤与产物持久化服务实现。
@@ -37,9 +42,8 @@ public class WorkflowPersistenceServiceImpl implements WorkflowPersistenceServic
         if (workflowRun == null || workflowRun.getId() == null || response == null) {
             return;
         }
-        workflowStepMapper.deleteByQuery(QueryWrapper.create().eq("runId", workflowRun.getId()));
         workflowArtifactMapper.deleteByQuery(QueryWrapper.create().eq("runId", workflowRun.getId()));
-        saveSteps(workflowRun, response);
+        saveMissingSteps(workflowRun, response);
         saveArtifacts(workflowRun, response);
     }
 
@@ -55,6 +59,29 @@ public class WorkflowPersistenceServiceImpl implements WorkflowPersistenceServic
                 stepNumber
         );
         workflowStepMapper.insert(step);
+    }
+
+    @Override
+    public void saveRetryParentArtifact(WorkflowRun retryRun, WorkflowRun parentRun) {
+        if (retryRun == null || retryRun.getId() == null || parentRun == null || parentRun.getId() == null) {
+            return;
+        }
+        LocalDateTime now = LocalDateTime.now();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("parentRunId", parentRun.getId());
+        payload.put("parentRequestId", parentRun.getRequestId());
+        payload.put("parentStatus", parentRun.getStatus());
+        payload.put("parentPrompt", parentRun.getPrompt());
+        payload.put("retryRunId", retryRun.getId());
+        payload.put("retryRequestId", retryRun.getRequestId());
+        workflowArtifactMapper.insert(WorkflowArtifact.builder()
+                .runId(retryRun.getId())
+                .artifactType("retry_parent")
+                .summary("重试来源 runId=" + parentRun.getId())
+                .jsonContent(JSONUtil.toJsonStr(payload))
+                .createTime(now)
+                .updateTime(now)
+                .build());
     }
 
     @Override
@@ -91,10 +118,18 @@ public class WorkflowPersistenceServiceImpl implements WorkflowPersistenceServic
         return CollUtil.emptyIfNull(artifacts);
     }
 
-    private void saveSteps(WorkflowRun workflowRun, WorkflowV2Response response) {
+    private void saveMissingSteps(WorkflowRun workflowRun, WorkflowV2Response response) {
         List<AgentExecutionRecord> timeline = CollUtil.emptyIfNull(response.getAgentTimeline());
-        int stepNumber = 1;
-        for (AgentExecutionRecord record : timeline) {
+        long existingStepCount = workflowStepMapper.selectCountByQuery(QueryWrapper.create()
+                .eq("runId", workflowRun.getId())
+                .eq("isDelete", 0));
+        if (existingStepCount >= timeline.size()) {
+            return;
+        }
+        int startIndex = Math.toIntExact(Math.max(existingStepCount, 0));
+        int stepNumber = startIndex + 1;
+        for (int i = startIndex; i < timeline.size(); i++) {
+            AgentExecutionRecord record = timeline.get(i);
             if (record == null) {
                 continue;
             }
@@ -111,6 +146,7 @@ public class WorkflowPersistenceServiceImpl implements WorkflowPersistenceServic
                                            AgentExecutionRecord record,
                                            String requestId,
                                            int stepNumber) {
+        LocalDateTime now = LocalDateTime.now();
         return WorkflowStep.builder()
                 .runId(workflowRun.getId())
                 .requestId(requestId)
@@ -124,6 +160,8 @@ public class WorkflowPersistenceServiceImpl implements WorkflowPersistenceServic
                 .startedTime(record.getStartAt())
                 .finishedTime(record.getEndAt())
                 .durationMs(record.getDurationMs())
+                .createTime(now)
+                .updateTime(now)
                 .build();
     }
 
@@ -153,10 +191,12 @@ public class WorkflowPersistenceServiceImpl implements WorkflowPersistenceServic
         addArtifact(records, workflowRun, "fix",
                 artifacts.getFixPlanArtifact() == null ? null : artifacts.getFixPlanArtifact().getAttemptLabel(),
                 null, artifacts.getFixPlanArtifact());
+        VerificationArtifact verificationArtifact = artifacts.getVerificationArtifact();
         addArtifact(records, workflowRun, "verification",
-                artifacts.getVerificationArtifact() == null ? null : artifacts.getVerificationArtifact().getSummary(),
-                artifacts.getVerificationArtifact() == null ? null : artifacts.getVerificationArtifact().getBuildResultDir(),
-                artifacts.getVerificationArtifact());
+                verificationArtifact == null ? null : verificationArtifact.getSummary(),
+                verificationArtifact == null ? null : verificationArtifact.getBuildResultDir(),
+                verificationArtifact);
+        addBrowserVerificationArtifacts(records, workflowRun, verificationArtifact);
         addArtifact(records, workflowRun, "final",
                 artifacts.getFinalArtifact() == null ? null : artifacts.getFinalArtifact().getSummary(),
                 null, artifacts.getFinalArtifact());
@@ -174,12 +214,63 @@ public class WorkflowPersistenceServiceImpl implements WorkflowPersistenceServic
         if (payload == null) {
             return;
         }
+        LocalDateTime now = LocalDateTime.now();
         records.add(WorkflowArtifact.builder()
                 .runId(workflowRun.getId())
                 .artifactType(artifactType)
                 .summary(summary)
                 .path(path)
                 .jsonContent(JSONUtil.toJsonStr(payload))
+                .createTime(now)
+                .updateTime(now)
+                .build());
+    }
+
+    private void addBrowserVerificationArtifacts(List<WorkflowArtifact> records,
+                                                 WorkflowRun workflowRun,
+                                                 VerificationArtifact verificationArtifact) {
+        if (verificationArtifact == null || verificationArtifact.getBrowserVerification() == null) {
+            return;
+        }
+        BrowserVerificationResult browserVerification = verificationArtifact.getBrowserVerification();
+        if (!browserVerification.isEnabled()) {
+            return;
+        }
+        addArtifact(records, workflowRun, "browser_verification",
+                browserVerification.getSummary(),
+                null,
+                browserVerification.getPreviewUrl(),
+                browserVerification);
+        if (StrUtil.isNotBlank(browserVerification.getScreenshotPath())
+                || StrUtil.isNotBlank(browserVerification.getScreenshotUrl())) {
+            addArtifact(records, workflowRun, "verification_screenshot",
+                    "浏览器验证截图",
+                    browserVerification.getScreenshotPath(),
+                    browserVerification.getScreenshotUrl(),
+                    browserVerification);
+        }
+    }
+
+    private void addArtifact(List<WorkflowArtifact> records,
+                             WorkflowRun workflowRun,
+                             String artifactType,
+                             String summary,
+                             String path,
+                             String url,
+                             Object payload) {
+        if (payload == null) {
+            return;
+        }
+        LocalDateTime now = LocalDateTime.now();
+        records.add(WorkflowArtifact.builder()
+                .runId(workflowRun.getId())
+                .artifactType(artifactType)
+                .summary(summary)
+                .path(path)
+                .url(url)
+                .jsonContent(JSONUtil.toJsonStr(payload))
+                .createTime(now)
+                .updateTime(now)
                 .build());
     }
 

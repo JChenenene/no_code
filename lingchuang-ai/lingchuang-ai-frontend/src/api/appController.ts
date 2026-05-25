@@ -144,6 +144,36 @@ export async function getWorkflowRunDetail(
   })
 }
 
+/** 此处后端没有提供注释 POST /app/workflow/${param0}/cancel */
+export async function cancelWorkflowRun(
+  params: API.getWorkflowRunDetailParams,
+  options?: { [key: string]: any }
+) {
+  const { runId: param0, ...queryParams } = params
+  return request<API.BaseResponseBoolean>(`/app/workflow/${param0}/cancel`, {
+    method: 'POST',
+    params: {
+      ...queryParams,
+    },
+    ...(options || {}),
+  })
+}
+
+/** 此处后端没有提供注释 GET /app/workflow/${param0}/retry */
+export async function retryWorkflowRun(
+  params: API.getWorkflowRunDetailParams,
+  options?: { [key: string]: any }
+) {
+  const { runId: param0, ...queryParams } = params
+  return request<API.ServerSentEventString[]>(`/app/workflow/${param0}/retry`, {
+    method: 'GET',
+    params: {
+      ...queryParams,
+    },
+    ...(options || {}),
+  })
+}
+
 /** 此处后端没有提供注释 GET /app/workflow/${param0}/steps */
 export async function listWorkflowRunSteps(
   params: API.getWorkflowRunDetailParams,

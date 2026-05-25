@@ -66,6 +66,23 @@ create table chat_history
     INDEX idx_appId_createTime (appId, createTime) -- 游标查询核心索引
 ) comment '对话历史' collate = utf8mb4_unicode_ci;
 
+-- 应用对话摘要记忆表
+create table if not exists app_chat_summary
+(
+    id                bigint auto_increment comment 'id' primary key,
+    appId             bigint                             not null comment '应用 id',
+    userId            bigint                             not null comment '创建用户 id',
+    summaryType       varchar(32)                        not null comment '摘要类型：conversation/tool/decision',
+    summaryText       mediumtext                         not null comment '摘要内容',
+    coveredMessageIds text                               null comment '摘要覆盖的对话消息 id',
+    tokenEstimate     int      default 0                 not null comment '摘要 token 估算值',
+    createTime        datetime default CURRENT_TIMESTAMP not null comment '创建时间',
+    updateTime        datetime default CURRENT_TIMESTAMP not null on update CURRENT_TIMESTAMP comment '更新时间',
+    isDelete          tinyint  default 0                 not null comment '是否删除',
+    UNIQUE KEY uk_app_user_type (appId, userId, summaryType),
+    INDEX idx_appId_userId_updateTime (appId, userId, updateTime)
+) comment '应用对话摘要记忆' collate = utf8mb4_unicode_ci;
+
 -- V2 工作流运行记录表
 create table if not exists workflow_run
 (

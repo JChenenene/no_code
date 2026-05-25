@@ -44,6 +44,7 @@ public class WorkflowV2PromptComposer {
         appendListSection(prompt, "验收标准", taskSpec == null ? List.of() : taskSpec.getAcceptanceCriteria(), "生成结果应与需求一致，并具备可运行性");
 
         appendRetrievalSection(prompt, state.getRetrievalBundle());
+        appendSkillSection(prompt, state.getRetrievalBundle());
         appendAssetSection(prompt, state.getAssetPlan());
 
         prompt.append("""
@@ -104,6 +105,11 @@ public class WorkflowV2PromptComposer {
         if (retrievalBundle == null) {
             return;
         }
+        if (StrUtil.isNotBlank(retrievalBundle.getMemorySummary())) {
+            prompt.append("\n## 长期对话摘要记忆\n")
+                    .append(truncate(retrievalBundle.getMemorySummary(), 1800))
+                    .append("\n");
+        }
         prompt.append("\n## 检索上下文\n");
         if (retrievalBundle.isDegraded()) {
             prompt.append("- 检索服务降级：").append(StrUtil.blankToDefault(retrievalBundle.getErrorMessage(), "未获取到额外上下文")).append("\n");
@@ -117,6 +123,21 @@ public class WorkflowV2PromptComposer {
         for (int i = 0; i < retrievalBundle.getSnippets().size(); i++) {
             prompt.append("- 参考片段 ").append(i + 1).append("：")
                     .append(retrievalBundle.getSnippets().get(i)).append("\n");
+        }
+    }
+
+    private void appendSkillSection(StringBuilder prompt, RetrievalBundle retrievalBundle) {
+        if (retrievalBundle == null || CollUtil.isEmpty(retrievalBundle.getSkillContents())) {
+            return;
+        }
+        prompt.append("\n## 按需加载 Skill\n");
+        for (String skillContent : retrievalBundle.getSkillContents()) {
+            prompt.append(truncate(skillContent, 3000)).append("\n\n");
+        }
+        if (CollUtil.isNotEmpty(retrievalBundle.getMissingSkills())) {
+            prompt.append("- 未找到以下 Skill，按通用最佳实践降级：")
+                    .append(String.join("，", retrievalBundle.getMissingSkills()))
+                    .append("\n");
         }
     }
 

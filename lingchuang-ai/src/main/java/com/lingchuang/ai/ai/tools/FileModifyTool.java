@@ -22,6 +22,9 @@ import java.nio.file.StandardOpenOption;
 @RequiredArgsConstructor
 public class FileModifyTool extends BaseTool {
 
+    private static final int MAX_FILE_CONTENT_BYTES = 1024 * 1024;
+    private static final int TOOL_RESULT_PREVIEW_CHARS = 600;
+
     private final ToolPathResolver toolPathResolver;
 
     @Tool("修改文件内容，用新内容替换指定的旧内容")
@@ -46,6 +49,9 @@ public class FileModifyTool extends BaseTool {
             String modifiedContent = originalContent.replace(oldContent, newContent);
             if (originalContent.equals(modifiedContent)) {
                 return "信息：替换后文件内容未发生变化 - " + relativeFilePath;
+            }
+            if (modifiedContent.getBytes().length > MAX_FILE_CONTENT_BYTES) {
+                return "修改文件失败: 文件内容超过 1MB 限制";
             }
             Files.writeString(path, modifiedContent, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
             log.info("成功修改文件: {}", path.toAbsolutePath());
@@ -74,6 +80,8 @@ public class FileModifyTool extends BaseTool {
         String relativeFilePath = arguments.getStr("relativeFilePath");
         String oldContent = arguments.getStr("oldContent");
         String newContent = arguments.getStr("newContent");
+        String displayOldContent = summarizeContent(oldContent);
+        String displayNewContent = summarizeContent(newContent);
         // 显示对比内容
         return String.format("""
                 [工具调用] %s %s
@@ -87,6 +95,17 @@ public class FileModifyTool extends BaseTool {
                 ```
                 %s
                 ```
-                """, getDisplayName(), relativeFilePath, oldContent, newContent);
+                """, getDisplayName(), relativeFilePath, displayOldContent, displayNewContent);
+    }
+
+    private String summarizeContent(String content) {
+        if (content == null) {
+            return "";
+        }
+        if (content.length() <= TOOL_RESULT_PREVIEW_CHARS) {
+            return content;
+        }
+        return content.substring(0, TOOL_RESULT_PREVIEW_CHARS)
+                + "\n... 内容已截断，原始长度 " + content.length() + " 字符";
     }
 }

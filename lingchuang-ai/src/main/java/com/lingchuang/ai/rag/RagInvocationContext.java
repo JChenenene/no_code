@@ -23,6 +23,8 @@ public class RagInvocationContext {
     @Builder.Default
     private final List<ChatHistory> recentHistories = List.of();
 
+    private final String memorySummary;
+
     private final String expandedRetrievalQuery;
 
     private final String rewrittenUserPrompt;

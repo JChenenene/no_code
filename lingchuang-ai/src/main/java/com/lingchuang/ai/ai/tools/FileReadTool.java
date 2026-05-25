@@ -21,6 +21,8 @@ import java.nio.file.Path;
 @RequiredArgsConstructor
 public class FileReadTool extends BaseTool {
 
+    private static final long MAX_FILE_CONTENT_BYTES = 1024 * 1024;
+
     private final ToolPathResolver toolPathResolver;
 
     @Tool("读取指定路径的文件内容")
@@ -33,6 +35,9 @@ public class FileReadTool extends BaseTool {
             Path path = toolPathResolver.resolveForRead(relativeFilePath, appId);
             if (!Files.exists(path) || !Files.isRegularFile(path)) {
                 return "错误：文件不存在或不是文件 - " + relativeFilePath;
+            }
+            if (Files.size(path) > MAX_FILE_CONTENT_BYTES) {
+                return "读取文件失败: 文件内容超过 1MB 限制";
             }
             return Files.readString(path);
         } catch (IllegalArgumentException e) {

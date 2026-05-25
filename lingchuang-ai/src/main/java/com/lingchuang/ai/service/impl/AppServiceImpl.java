@@ -33,12 +33,14 @@ import com.lingchuang.ai.model.entity.WorkflowRun;
 import com.lingchuang.ai.model.entity.WorkflowStep;
 import com.lingchuang.ai.model.enums.ChatHistoryMessageTypeEnum;
 import com.lingchuang.ai.model.enums.CodeGenTypeEnum;
+import com.lingchuang.ai.model.enums.WorkflowRunStatusEnum;
 import com.lingchuang.ai.model.vo.AppVO;
 import com.lingchuang.ai.model.vo.UserVO;
 import com.lingchuang.ai.model.vo.WorkflowRunDetailVO;
 import com.lingchuang.ai.monitor.MonitorContext;
 import com.lingchuang.ai.monitor.MonitorContextHolder;
 import com.lingchuang.ai.rag.RagInvocationContext;
+import com.lingchuang.ai.service.AppChatSummaryService;
 import com.lingchuang.ai.service.AppService;
 import com.lingchuang.ai.service.ChatHistoryService;
 import com.lingchuang.ai.service.ProjectDownloadService;
@@ -84,6 +86,9 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     private ChatHistoryService chatHistoryService;
 
     @Resource
+    private AppChatSummaryService appChatSummaryService;
+
+    @Resource
     private StreamHandlerExecutor streamHandlerExecutor;
 
     @Resource
@@ -127,6 +132,12 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
         } catch (Exception e) {
             log.warn("获取最近历史对话失败，继续使用原始提示词，appId: {}", appId, e);
         }
+        String memorySummary = "";
+        try {
+            memorySummary = appChatSummaryService.getLatestSummaryText(appId, loginUser.getId());
+        } catch (Exception e) {
+            log.warn("获取对话摘要失败，继续使用最近历史，appId: {}", appId, e);
+        }
         // 6. 在调用 AI 前，先保存用户消息到数据库中
         chatHistoryService.addChatMessage(appId, message, ChatHistoryMessageTypeEnum.USER.getValue(), loginUser.getId());
         // 7. 在创建 Flux 前捕获本次请求的 RAG 与监控上下文
@@ -134,6 +145,7 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                 .appId(appId)
                 .codeGenType(codeGenTypeEnum)
                 .recentHistories(recentHistories)
+                .memorySummary(memorySummary)
                 .build();
         MonitorContext monitorContext = MonitorContext.builder()
                 .userId(loginUser.getId().toString())
@@ -156,15 +168,30 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     @Override
     public Flux<String> chatToGenCodeV2(Long appId, String message, User loginUser) {
         App app = validateChatRequest(appId, message, loginUser);
+        if (CodeGenTypeEnum.getEnumByValue(app.getCodeGenType()) == null) {
+            throw new BusinessException(ErrorCode.PARAMS_ERROR, "应用代码生成类型错误");
+        }
+        WorkflowRun runningRun = workflowRunService.getRunningRun(appId, loginUser.getId());
+        if (runningRun != null) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "当前应用已有运行中的 V2 工作流，请等待完成或取消后重试");
+        }
+        chatHistoryService.addChatMessage(appId, message, ChatHistoryMessageTypeEnum.USER.getValue(), loginUser.getId());
+        return startWorkflowV2Run(app, appId, message, loginUser, null);
+    }
+
+    private Flux<String> startWorkflowV2Run(App app, Long appId, String message, User loginUser, WorkflowRun parentRun) {
         CodeGenTypeEnum codeGenTypeEnum = CodeGenTypeEnum.getEnumByValue(app.getCodeGenType());
         if (codeGenTypeEnum == null) {
             throw new BusinessException(ErrorCode.PARAMS_ERROR, "应用代码生成类型错误");
         }
-        chatHistoryService.addChatMessage(appId, message, ChatHistoryMessageTypeEnum.USER.getValue(), loginUser.getId());
         WorkflowRun workflowRun = workflowRunService.createRunningRun(appId, loginUser.getId(), message, codeGenTypeEnum.getValue());
+        workflowRuntimeService.registerWorkflowJob(workflowRun.getId(), workflowRun.getRequestId());
         String workspacePath = generatedArtifactSupport.resolveRunWorkspaceDir(codeGenTypeEnum, appId, workflowRun.getId());
         String previewUrl = generatedArtifactSupport.resolvePreviewUrl(appId, workflowRun.getId(), codeGenTypeEnum);
         workflowRunService.attachWorkspace(workflowRun, workspacePath, previewUrl);
+        if (parentRun != null) {
+            workflowPersistenceService.saveRetryParentArtifact(workflowRun, parentRun);
+        }
         Flux<String> workflowFlux = workflowRuntimeService.executeWorkflowV2WithFlux(
                 message,
                 appId,
@@ -180,6 +207,10 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                 .doOnNext(responseBuilder::append)
                 .doOnComplete(() -> {
                     WorkflowCompletionResult completionResult = buildWorkflowCompletionResult(responseBuilder.toString());
+                    if (workflowRunService.isCancelled(workflowRun.getId())) {
+                        log.info("workflowRunId={} 已取消，跳过完成态覆盖", workflowRun.getId());
+                        return;
+                    }
                     if (completionResult.response() != null) {
                         workflowPersistenceService.saveWorkflowResult(workflowRun, completionResult.response());
                     }
@@ -190,7 +221,12 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
                     }
                     chatHistoryService.addChatMessage(app.getId(), completionResult.summary(), ChatHistoryMessageTypeEnum.AI.getValue(), loginUser.getId());
                 })
-                .doOnError(error -> workflowRunService.markFailed(workflowRun, error.getMessage()));
+                .doOnError(error -> {
+                    if (!workflowRunService.isCancelled(workflowRun.getId())) {
+                        workflowRunService.markFailed(workflowRun, error.getMessage());
+                    }
+                })
+                .doFinally(signalType -> workflowRuntimeService.removeWorkflowJob(workflowRun.getId()));
     }
 
     @Override
@@ -216,6 +252,35 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
     public WorkflowRunDetailVO getWorkflowRunDetail(Long runId, User loginUser) {
         WorkflowRun workflowRun = validateWorkflowRunOwner(runId, loginUser);
         return workflowPersistenceService.buildDetail(workflowRun);
+    }
+
+    @Override
+    public WorkflowRun getWorkflowRunStatus(Long runId, User loginUser) {
+        return validateWorkflowRunOwner(runId, loginUser);
+    }
+
+    @Override
+    public boolean cancelWorkflowRun(Long runId, User loginUser) {
+        WorkflowRun workflowRun = validateWorkflowRunOwner(runId, loginUser);
+        if (!WorkflowRunStatusEnum.RUNNING.getValue().equals(workflowRun.getStatus())) {
+            return false;
+        }
+        workflowRuntimeService.cancelWorkflowJob(workflowRun.getId(), "用户取消 V2 工作流");
+        return workflowRunService.cancelRun(workflowRun, "用户取消 V2 工作流");
+    }
+
+    @Override
+    public Flux<String> retryWorkflowRun(Long runId, User loginUser) {
+        WorkflowRun parentRun = validateWorkflowRunOwner(runId, loginUser);
+        if (!isRetryableWorkflowRun(parentRun)) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "只有失败或已取消的 V2 工作流可以重试");
+        }
+        WorkflowRun runningRun = workflowRunService.getRunningRun(parentRun.getAppId(), loginUser.getId());
+        if (runningRun != null) {
+            throw new BusinessException(ErrorCode.OPERATION_ERROR, "当前应用已有运行中的 V2 工作流，请等待完成或取消后重试");
+        }
+        App app = validateAppOwner(parentRun.getAppId(), loginUser);
+        return startWorkflowV2Run(app, parentRun.getAppId(), parentRun.getPrompt(), loginUser, parentRun);
     }
 
     @Override
@@ -255,6 +320,14 @@ public class AppServiceImpl extends ServiceImpl<AppMapper, App> implements AppSe
             throw new BusinessException(ErrorCode.NO_AUTH_ERROR, "无权限访问该工作流运行记录");
         }
         return workflowRun;
+    }
+
+    private boolean isRetryableWorkflowRun(WorkflowRun workflowRun) {
+        if (workflowRun == null || StrUtil.isBlank(workflowRun.getStatus())) {
+            return false;
+        }
+        return WorkflowRunStatusEnum.FAILED.getValue().equals(workflowRun.getStatus())
+                || WorkflowRunStatusEnum.CANCELLED.getValue().equals(workflowRun.getStatus());
     }
 
     private WorkflowCompletionResult buildWorkflowCompletionResult(String rawSseStream) {

@@ -18,6 +18,8 @@ public interface WorkflowPersistenceService {
 
     void saveWorkflowStep(WorkflowRun workflowRun, AgentExecutionRecord record, int stepNumber);
 
+    void saveRetryParentArtifact(WorkflowRun retryRun, WorkflowRun parentRun);
+
     WorkflowRunDetailVO buildDetail(WorkflowRun workflowRun);
 
     List<WorkflowStep> listSteps(Long runId);

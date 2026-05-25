@@ -3,17 +3,20 @@ package com.lingchuang.ai.service;
 import com.lingchuang.ai.langgraph4j.CodeGenWorkflow;
 import com.lingchuang.ai.langgraph4j.state.WorkflowContext;
 import com.lingchuang.ai.langgraph4j.v2.CodeGenWorkflowV2;
+import com.lingchuang.ai.langgraph4j.v2.runtime.WorkflowCancelToken;
+import com.lingchuang.ai.langgraph4j.v2.runtime.WorkflowJobRegistry;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowFinalStatus;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowV2Response;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import reactor.core.publisher.Flux;
 
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -26,8 +29,15 @@ class WorkflowRuntimeServiceTest {
     @Mock
     private CodeGenWorkflowV2 codeGenWorkflowV2;
 
-    @InjectMocks
     private WorkflowRuntimeService workflowRuntimeService;
+
+    private WorkflowJobRegistry workflowJobRegistry;
+
+    @BeforeEach
+    void setUp() {
+        workflowJobRegistry = new WorkflowJobRegistry();
+        workflowRuntimeService = new WorkflowRuntimeService(codeGenWorkflow, codeGenWorkflowV2, workflowJobRegistry);
+    }
 
     @Test
     void shouldDelegateV1ExecutionMethods() {
@@ -68,7 +78,8 @@ class WorkflowRuntimeServiceTest {
                 1001L,
                 "req-1",
                 9001L,
-                "D:/tmp/code_output/1001/9001/vue_project"
+                "D:/tmp/code_output/1001/9001/vue_project",
+                workflowJobRegistry.getCancelToken(9001L)
         )).thenReturn(flux);
 
         assertSame(flux, workflowRuntimeService.executeWorkflowV2WithFlux(
@@ -83,7 +94,18 @@ class WorkflowRuntimeServiceTest {
                 1001L,
                 "req-1",
                 9001L,
-                "D:/tmp/code_output/1001/9001/vue_project"
+                "D:/tmp/code_output/1001/9001/vue_project",
+                workflowJobRegistry.getCancelToken(9001L)
         );
+    }
+
+    @Test
+    void shouldCancelRegisteredWorkflowRun() {
+        WorkflowCancelToken cancelToken = workflowRuntimeService.registerWorkflowJob(9001L, "req-1");
+
+        boolean cancelled = workflowRuntimeService.cancelWorkflowJob(9001L, "用户取消");
+
+        assertTrue(cancelled);
+        assertTrue(cancelToken.isCancelled());
     }
 }

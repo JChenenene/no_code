@@ -14,9 +14,11 @@ import com.lingchuang.ai.model.entity.ChatHistory;
 import com.lingchuang.ai.mapper.ChatHistoryMapper;
 import com.lingchuang.ai.model.entity.User;
 import com.lingchuang.ai.model.enums.ChatHistoryMessageTypeEnum;
+import com.lingchuang.ai.service.AppChatSummaryService;
 import com.lingchuang.ai.service.AppService;
 import com.lingchuang.ai.service.ChatHistoryService;
 import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import jakarta.annotation.Resource;
@@ -38,6 +40,10 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
     @Lazy
     private AppService appService;
 
+    @Resource
+    @Lazy
+    private AppChatSummaryService appChatSummaryService;
+
     @Override
     public boolean addChatMessage(Long appId, String message, String messageType, Long userId) {
         // 基础校验
@@ -55,7 +61,15 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
                 .messageType(messageType)
                 .userId(userId)
                 .build();
-        return this.save(chatHistory);
+        boolean saved = this.save(chatHistory);
+        if (saved) {
+            try {
+                appChatSummaryService.refreshConversationSummary(appId, userId);
+            } catch (Exception e) {
+                log.warn("刷新对话摘要失败，appId: {}, userId: {}, error: {}", appId, userId, e.getMessage());
+            }
+        }
+        return saved;
     }
 
     @Override
@@ -91,20 +105,20 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
     @Override
     public int loadChatHistoryToMemory(Long appId, MessageWindowChatMemory chatMemory, int maxCount) {
         try {
-            QueryWrapper queryWrapper = QueryWrapper.create()
-                    .eq(ChatHistory::getAppId, appId)
-                    .orderBy(ChatHistory::getCreateTime, false)
-                    .limit(1, maxCount);
-            List<ChatHistory> historyList = this.list(queryWrapper);
-            if (CollUtil.isEmpty(historyList)) {
-                return 0;
-            }
-            // 反转列表，确保按照时间正序（老的在前，新的在后）
-            historyList = historyList.reversed();
+            int recentRawCount = resolveRecentRawCount(maxCount);
+            List<ChatHistory> historyList = listRecentHistories(appId, null, recentRawCount);
             // 按照时间顺序将消息添加到记忆中
             int loadedCount = 0;
             // 先清理历史缓存，防止重复加载
             chatMemory.clear();
+            String memorySummary = appChatSummaryService.getLatestSummaryText(appId, null);
+            if (StrUtil.isNotBlank(memorySummary)) {
+                chatMemory.add(SystemMessage.from("""
+                        以下是该应用的长期对话摘要记忆，用于理解用户偏好和历史决策。若与用户当前明确需求冲突，以当前需求为准。
+                        %s
+                        """.formatted(memorySummary).trim()));
+                loadedCount++;
+            }
             for (ChatHistory history : historyList) {
                 if (ChatHistoryMessageTypeEnum.USER.getValue().equals(history.getMessageType())) {
                     chatMemory.add(UserMessage.from(history.getMessage()));
@@ -120,6 +134,32 @@ public class ChatHistoryServiceImpl extends ServiceImpl<ChatHistoryMapper, ChatH
             // 加载失败不影响系统运行，只是没有历史上下文
             return 0;
         }
+    }
+
+    @Override
+    public List<ChatHistory> listRecentHistories(Long appId, Long userId, int maxCount) {
+        if (appId == null || appId <= 0 || maxCount <= 0) {
+            return List.of();
+        }
+        QueryWrapper queryWrapper = QueryWrapper.create()
+                .eq(ChatHistory::getAppId, appId)
+                .orderBy(ChatHistory::getCreateTime, false)
+                .limit(1, maxCount);
+        if (userId != null && userId > 0) {
+            queryWrapper.eq(ChatHistory::getUserId, userId);
+        }
+        List<ChatHistory> historyList = this.list(queryWrapper);
+        if (CollUtil.isEmpty(historyList)) {
+            return List.of();
+        }
+        return historyList.reversed();
+    }
+
+    private int resolveRecentRawCount(int maxCount) {
+        if (maxCount <= 0) {
+            return 0;
+        }
+        return Math.min(maxCount, 6);
     }
 
     /**

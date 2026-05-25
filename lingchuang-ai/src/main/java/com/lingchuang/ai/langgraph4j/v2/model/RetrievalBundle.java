@@ -29,11 +29,22 @@ public class RetrievalBundle implements Serializable {
 
     private String summary;
 
+    private String memorySummary;
+
     @Builder.Default
     private List<String> sources = List.of();
 
     @Builder.Default
     private List<String> snippets = List.of();
+
+    @Builder.Default
+    private List<String> loadedSkills = List.of();
+
+    @Builder.Default
+    private List<String> missingSkills = List.of();
+
+    @Builder.Default
+    private List<String> skillContents = List.of();
 
     private String errorMessage;
 }

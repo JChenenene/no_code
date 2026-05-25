@@ -17,6 +17,7 @@ import com.lingchuang.ai.langgraph4j.v2.model.TaskSpec;
 import com.lingchuang.ai.langgraph4j.v2.model.VerificationArtifact;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowFinalStatus;
 import com.lingchuang.ai.langgraph4j.v2.model.WorkflowV2Response;
+import com.lingchuang.ai.langgraph4j.v2.runtime.WorkflowCancelToken;
 import com.lingchuang.ai.langgraph4j.v2.service.WorkflowV2ResponseMapper;
 import com.lingchuang.ai.langgraph4j.v2.state.AgentSessionState;
 import org.bsc.langgraph4j.prebuilt.MessagesState;
@@ -260,6 +261,31 @@ class CodeGenWorkflowV2FlowTest {
 
         assertEquals(WorkflowFinalStatus.SUCCESS, response.getFinalStatus());
         assertEquals(8899L, response.getArtifacts().getCodeArtifact().getAppId());
+    }
+
+    @Test
+    void shouldStopBeforeNextNodeWhenWorkflowIsCancelled() {
+        WorkflowCancelToken cancelToken = new WorkflowCancelToken(9001L, "req-1");
+        doAnswer(invocation -> mutateState(invocation.getArgument(0), state -> {
+            state.setTaskSpec(TaskSpec.builder()
+                    .targetCodeGenType("html")
+                    .needsRetrieval(false)
+                    .needsAssetPlanning(false)
+                    .build());
+            cancelToken.cancel("用户取消");
+        })).when(requirementPlannerAgent).execute(any());
+
+        WorkflowV2Response response = codeGenWorkflowV2.executeWorkflow(
+                "生成一个 HTML 页面",
+                8899L,
+                "req-1",
+                9001L,
+                "D:/tmp/code_output/8899/9001/html",
+                cancelToken
+        );
+
+        assertEquals(WorkflowFinalStatus.ERROR, response.getFinalStatus());
+        verify(codeAuthorAgent, times(0)).execute(any());
     }
 
     private Map<String, Object> mutateState(MessagesState<String> messagesState, Consumer<AgentSessionState> consumer) {

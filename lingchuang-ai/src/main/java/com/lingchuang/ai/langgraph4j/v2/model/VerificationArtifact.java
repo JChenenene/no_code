@@ -40,4 +40,6 @@ public class VerificationArtifact implements Serializable {
     private boolean canFix;
 
     private String failureType;
+
+    private BrowserVerificationResult browserVerification;
 }

@@ -21,13 +21,23 @@
 - 给出可验证的验收标准
 - 优先写“页面结构完整”“风格统一”“能运行/能构建”“信息展示清晰”等
 
-6. codeGenTypeCandidates
+6. requiredSkills
+- 按需选择后续要加载的 Skill，只输出必要项，避免全部加载
+- 可选值：
+  - design-ui：界面视觉、布局层次、交互状态、响应式页面
+  - vue-project：Vue 工程、组件拆分、构建配置
+  - deployment：部署、预览、静态资源路径、产物发布
+  - code-review：代码审查、修复建议、阻塞问题识别
+  - asset-collection：图片、图标、Logo、插画、图表等素材规划
+- 如果只是非常简单的静态文本页面，最多选择 design-ui
+
+7. codeGenTypeCandidates
 - 候选值只能来自：
   - html
   - multi_file
   - vue_project
 
-7. targetCodeGenType
+8. targetCodeGenType
 - 选择最适合的一个值
 - 如果用户要求项目工程、后台系统、组件化页面、管理端，优先 vue_project
 - 如果只是简单页面或静态单页展示，优先 html

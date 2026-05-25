@@ -24,3 +24,5 @@ nginx-1.29.1/
 **/.mvn/repository/
 **/.mvn/local-settings.xml
 **/.mvn/maven.config
+**/application-local.yml
+**/application-local.yaml
